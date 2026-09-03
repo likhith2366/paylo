@@ -1,0 +1,7 @@
+# Serving only. Training additionally needs pandas, scikit-learn, and kaggle —
+# kept out so the runtime image stays small and has less to patch.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+xgboost==3.2.0
+numpy==1.26.4
+pydantic==2.10.4

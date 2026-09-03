@@ -79,8 +79,19 @@ def build_features(df: pd.DataFrame, category_map=None, state_map=None) -> tuple
     df["trans_date_trans_time"] = pd.to_datetime(df["trans_date_trans_time"])
     df["dob"] = pd.to_datetime(df["dob"])
 
-    # Chronological order is required for the rolling windows below to mean
-    # anything. Sorting by card then time also groups each card's history.
+    # Remember where every row started.
+    #
+    # This matters more than it looks. The rolling windows below need the frame
+    # sorted by card and time, but the caller pairs our output with a `y` taken
+    # in the ORIGINAL order. Returning sorted rows silently misaligns every
+    # label with someone else's features — which is not an error, just a model
+    # that learns nothing. It cost a full training run to find. The original
+    # order is restored before returning, and asserted at the end.
+    original_order = df.index.to_numpy().copy()
+    df["_row_id"] = np.arange(len(df))
+
+    # Chronological order within each card is required for the rolling windows
+    # to mean anything.
     df = df.sort_values(["cc_num", "trans_date_trans_time"]).reset_index(drop=True)
 
     # --- amount -------------------------------------------------------------
@@ -109,28 +120,28 @@ def build_features(df: pd.DataFrame, category_map=None, state_map=None) -> tuple
     # closed="left" excludes the current row from its own window. Without it
     # every transaction would count itself, and worse, the model would learn
     # from information unavailable at scoring time.
-    grouped = df.groupby("cc_num", group_keys=False)
+    #
+    # Each group is computed against its own index rather than relying on
+    # groupby.apply's concatenation order, which is not guaranteed to match row
+    # order and is exactly the kind of implicit ordering that caused the
+    # misalignment described above.
+    windows = {
+        "txn_count_1h": ("1h", "count"),
+        "txn_count_24h": ("24h", "count"),
+        "txn_count_7d": ("7D", "count"),
+        "amt_sum_24h": ("24h", "sum"),
+    }
+    for column in windows:
+        df[column] = np.nan
 
-    def rolling_count(g: pd.DataFrame, window: str) -> pd.Series:
-        return (
-            g.set_index("trans_date_trans_time")["amt"]
-            .rolling(window, closed="left")
-            .count()
-            .reset_index(drop=True)
-        )
-
-    def rolling_sum(g: pd.DataFrame, window: str) -> pd.Series:
-        return (
-            g.set_index("trans_date_trans_time")["amt"]
-            .rolling(window, closed="left")
-            .sum()
-            .reset_index(drop=True)
-        )
-
-    df["txn_count_1h"] = grouped.apply(lambda g: rolling_count(g, "1h")).values
-    df["txn_count_24h"] = grouped.apply(lambda g: rolling_count(g, "24h")).values
-    df["txn_count_7d"] = grouped.apply(lambda g: rolling_count(g, "7D")).values
-    df["amt_sum_24h"] = grouped.apply(lambda g: rolling_sum(g, "24h")).values
+    for _, group in df.groupby("cc_num", sort=False):
+        series = group.set_index("trans_date_trans_time")["amt"]
+        for column, (window, how) in windows.items():
+            rolled = series.rolling(window, closed="left")
+            values = rolled.count() if how == "count" else rolled.sum()
+            # group.index carries this group's positions in df, so the write
+            # lands on exactly the rows the values were computed from.
+            df.loc[group.index, column] = values.to_numpy()
 
     # A burst of charges seconds apart on one card is the classic card-testing
     # pattern — a fraudster verifying which stolen numbers still work.
@@ -161,5 +172,20 @@ def build_features(df: pd.DataFrame, category_map=None, state_map=None) -> tuple
     # the honest encoding, and XGBoost handles it natively by learning a default
     # direction per split — better than imputing a zero that would falsely read
     # as "this card has never been used in the last hour".
+
+    # Restore the caller's row order, so the returned features pair with the
+    # caller's labels.
+    df = df.sort_values("_row_id")
+    features = df[FEATURE_COLUMNS].copy()
+    features.index = original_order
+
+    # Assert it rather than trust it. A silent misalignment here produces a
+    # model that trains cleanly and predicts nothing, which is far more
+    # expensive to discover than a failed assertion.
+    if not np.array_equal(df["_row_id"].to_numpy(), np.arange(len(df))):
+        raise RuntimeError(
+            "features: row order was not restored — features and labels would misalign"
+        )
+
     encodings = {"category_map": category_map, "state_map": state_map}
-    return df[FEATURE_COLUMNS], encodings
+    return features, encodings

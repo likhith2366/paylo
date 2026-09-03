@@ -7,16 +7,20 @@ access_token
 *.pem
 *.key
 
-# ML data & artifacts (large, re-downloadable via `make ml-data`)
+# ML training data — 1.2GB, re-downloadable via `make ml-data`
 ml/data/raw/
 ml/data/processed/
-ml/artifacts/
 *.csv
 *.zip
 *.parquet
 *.pkl
 *.joblib
 *.ubj
+
+# ml/artifacts/ is deliberately NOT ignored. The trained model is 2.5MB, the
+# Docker build copies it in, and committing it is what makes the repo runnable
+# without a 4-minute training run first. Large models would belong in object
+# storage or LFS instead.
 
 # Python
 __pycache__/

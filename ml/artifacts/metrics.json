@@ -1,0 +1,122 @@
+{
+  "dataset": "sparkov",
+  "trained_at": "2026-09-03T17:25:02Z",
+  "rows_total": 1852394,
+  "rows_train": 1481915,
+  "rows_test": 370479,
+  "features": [
+    "amt",
+    "amt_log",
+    "amt_zscore_card",
+    "hour",
+    "day_of_week",
+    "is_night",
+    "is_weekend",
+    "age_years",
+    "distance_km",
+    "city_pop_log",
+    "txn_count_1h",
+    "txn_count_24h",
+    "txn_count_7d",
+    "amt_sum_24h",
+    "seconds_since_last_txn",
+    "category_encoded",
+    "state_encoded",
+    "gender_encoded"
+  ],
+  "best_iteration": 399,
+  "scale_pos_weight": 177.50096362322333,
+  "train": {
+    "pr_auc": 0.9994949932169742,
+    "roc_auc": 0.9999972820683077,
+    "fraud_rate": 0.005602210653107635,
+    "baseline_pr_auc": 0.005602210653107635,
+    "lift": 178.41081942581695,
+    "operating_points": {
+      "recall_50": {
+        "threshold": 0.9999126195907593,
+        "precision": 1.0,
+        "recall": 0.49987954709708504,
+        "true_positives": 4150,
+        "false_positives": 0,
+        "false_negatives": 4152,
+        "legit_declined_per_10k": 0.0
+      },
+      "recall_70": {
+        "threshold": 0.9995654225349426,
+        "precision": 1.0,
+        "recall": 0.6999518188388341,
+        "true_positives": 5811,
+        "false_positives": 0,
+        "false_negatives": 2491,
+        "legit_declined_per_10k": 0.0
+      },
+      "recall_90": {
+        "threshold": 0.9960274696350098,
+        "precision": 0.9985300013363624,
+        "recall": 0.900024090580583,
+        "true_positives": 7472,
+        "false_positives": 11,
+        "false_negatives": 830,
+        "legit_declined_per_10k": 0.07464646416664347
+      }
+    }
+  },
+  "test": {
+    "pr_auc": 0.9735456779421945,
+    "roc_auc": 0.9994537071591232,
+    "fraud_rate": 0.0036412320266465846,
+    "baseline_pr_auc": 0.0036412320266465846,
+    "lift": 267.36710839017513,
+    "operating_points": {
+      "recall_50": {
+        "threshold": 0.9998403787612915,
+        "precision": 1.0,
+        "recall": 0.5003706449221645,
+        "true_positives": 675,
+        "false_positives": 0,
+        "false_negatives": 674,
+        "legit_declined_per_10k": 0.0
+      },
+      "recall_70": {
+        "threshold": 0.9990129470825195,
+        "precision": 0.9989417989417989,
+        "recall": 0.6997776130467013,
+        "true_positives": 944,
+        "false_positives": 1,
+        "false_negatives": 405,
+        "legit_declined_per_10k": 0.02709072684420123
+      },
+      "recall_90": {
+        "threshold": 0.9503787159919739,
+        "precision": 0.9673306772908367,
+        "recall": 0.8999258710155671,
+        "true_positives": 1214,
+        "false_positives": 41,
+        "false_negatives": 135,
+        "legit_declined_per_10k": 1.1107198006122505
+      }
+    }
+  },
+  "feature_importance": {
+    "amt": 0.34192436933517456,
+    "is_night": 0.19231931865215302,
+    "amt_sum_24h": 0.1486886739730835,
+    "amt_log": 0.1163063645362854,
+    "category_encoded": 0.06194254755973816,
+    "txn_count_24h": 0.026347709819674492,
+    "txn_count_7d": 0.0228655356913805,
+    "hour": 0.02023211494088173,
+    "seconds_since_last_txn": 0.01606803946197033,
+    "amt_zscore_card": 0.011311189271509647,
+    "txn_count_1h": 0.008993346244096756,
+    "age_years": 0.008563890121877193,
+    "gender_encoded": 0.0062994081526994705,
+    "city_pop_log": 0.004635317251086235,
+    "is_weekend": 0.004123147577047348,
+    "state_encoded": 0.0033168583177030087,
+    "day_of_week": 0.0032465297263115644,
+    "distance_km": 0.0028156389016658068
+  },
+  "training_seconds": 230.5
+}
