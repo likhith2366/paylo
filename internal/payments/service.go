@@ -82,19 +82,19 @@ type ChargeInput struct {
 }
 
 type Charge struct {
-	ID               uuid.UUID      `json:"id"`
-	Object           string         `json:"object"`
-	AmountCents      int64          `json:"amount"`
-	Currency         string         `json:"currency"`
-	Status           string         `json:"status"`
-	FailureCode      string         `json:"failure_code,omitempty"`
-	FailureMessage   string         `json:"failure_message,omitempty"`
-	CardLast4        string         `json:"card_last4,omitempty"`
-	CardBrand        string         `json:"card_brand,omitempty"`
-	LedgerTxnID      *uuid.UUID     `json:"ledger_transaction_id,omitempty"`
-	ProcessorRef     string         `json:"processor_reference,omitempty"`
-	Metadata         map[string]any `json:"metadata"`
-	CreatedAt        time.Time      `json:"created_at"`
+	ID             uuid.UUID      `json:"id"`
+	Object         string         `json:"object"`
+	AmountCents    int64          `json:"amount"`
+	Currency       string         `json:"currency"`
+	Status         string         `json:"status"`
+	FailureCode    string         `json:"failure_code,omitempty"`
+	FailureMessage string         `json:"failure_message,omitempty"`
+	CardLast4      string         `json:"card_last4,omitempty"`
+	CardBrand      string         `json:"card_brand,omitempty"`
+	LedgerTxnID    *uuid.UUID     `json:"ledger_transaction_id,omitempty"`
+	ProcessorRef   string         `json:"processor_reference,omitempty"`
+	Metadata       map[string]any `json:"metadata"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 var (

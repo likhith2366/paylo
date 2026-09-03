@@ -24,23 +24,23 @@ import (
 // Account types. Merchant-scoped accounts carry a merchant_id; platform
 // accounts are singletons per currency.
 const (
-	AccountMerchantBalance   = "merchant_balance"
+	AccountMerchantBalance    = "merchant_balance"
 	AccountCustomerReceivable = "customer_receivable"
-	AccountPlatformFees      = "platform_fees"
-	AccountInTransit         = "in_transit"
-	AccountPaidOut           = "paid_out"
-	AccountMerchantDebt      = "merchant_debt"
-	AccountReserve           = "reserve"
+	AccountPlatformFees       = "platform_fees"
+	AccountInTransit          = "in_transit"
+	AccountPaidOut            = "paid_out"
+	AccountMerchantDebt       = "merchant_debt"
+	AccountReserve            = "reserve"
 )
 
 // Entry types, recording what caused a pair of entries to exist.
 const (
-	EntryCharge           = "charge"
-	EntryRefund           = "refund"
-	EntryDispute          = "dispute"
-	EntryDisputeReversal  = "dispute_reversal"
-	EntryPayout           = "payout"
-	EntryFee              = "fee"
+	EntryCharge          = "charge"
+	EntryRefund          = "refund"
+	EntryDispute         = "dispute"
+	EntryDisputeReversal = "dispute_reversal"
+	EntryPayout          = "payout"
+	EntryFee             = "fee"
 )
 
 const (

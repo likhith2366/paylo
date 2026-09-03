@@ -29,6 +29,9 @@ func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 func (h *Handler) Routes(r chi.Router) {
 	r.Post("/v1/charges", h.createCharge)
 	r.Get("/v1/charges/{id}", h.getCharge)
+	r.Post("/v1/refunds", h.createRefund)
+	r.Get("/v1/disputes/{id}", h.getDispute)
+	r.Post("/v1/disputes/{id}/evidence", h.submitDisputeEvidence)
 }
 
 type createChargeRequest struct {

@@ -90,9 +90,10 @@ func (f *fakeVault) Detokenize(_ context.Context, token, _, _ string) (string, e
 // This counter is the real assertion in the concurrency test: no matter what
 // the API returns, the customer's card must be hit exactly once.
 type fakeBank struct {
-	server    *httptest.Server
-	authCalls atomic.Int64
-	delay     time.Duration
+	server      *httptest.Server
+	authCalls   atomic.Int64
+	refundCalls atomic.Int64
+	delay       time.Duration
 }
 
 func newFakeBank(t *testing.T, delay time.Duration) *fakeBank {
@@ -120,6 +121,23 @@ func newFakeBank(t *testing.T, delay time.Duration) *fakeBank {
 			"processor_reference": "bank_" + uuid.NewString(),
 			"status":              "authorized",
 			"authorized_at":       time.Now().UTC().Format(time.RFC3339),
+		})
+	})
+
+	mux.HandleFunc("/simulator/refund", func(w http.ResponseWriter, r *http.Request) {
+		fb.refundCalls.Add(1)
+		if fb.delay > 0 {
+			time.Sleep(fb.delay)
+		}
+		if r.Header.Get("X-Simulate-Outcome") == "decline" {
+			writeJSON(w, map[string]any{
+				"status": "failed", "failure_code": "refund_not_permitted",
+			})
+			return
+		}
+		writeJSON(w, map[string]any{
+			"refund_reference": "rfnd_" + uuid.NewString(),
+			"status":           "succeeded",
 		})
 	})
 

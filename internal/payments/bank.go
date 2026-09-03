@@ -113,6 +113,63 @@ func (c *BankClient) Charge(ctx context.Context, req BankChargeRequest, simulate
 	return &out, nil
 }
 
+type BankRefundRequest struct {
+	IdempotencyKey     string `json:"idempotency_key"`
+	ProcessorReference string `json:"processor_reference"`
+	AmountCents        int64  `json:"amount_cents"`
+}
+
+type BankRefundResponse struct {
+	RefundReference string `json:"refund_reference"`
+	Status          string `json:"status"` // succeeded | failed
+	FailureCode     string `json:"failure_code,omitempty"`
+	AmountCents     int64  `json:"amount_cents"`
+}
+
+// Refund reverses a settled charge at the processor.
+//
+// Ambiguity matters as much here as it does for charges: a refund whose
+// outcome is unknown must not be retried blindly, or the customer gets their
+// money back twice and the merchant absorbs it.
+func (c *BankClient) Refund(ctx context.Context, req BankRefundRequest, simulateOutcome string) (*BankRefundResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("payments: marshal refund request: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/simulator/refund", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("payments: build refund request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if simulateOutcome != "" {
+		httpReq.Header.Set("X-Simulate-Outcome", simulateOutcome)
+	}
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, classifyTransportError(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 500 {
+		return nil, fmt.Errorf("%w: bank returned %d", ErrAmbiguous, resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("payments: refund returned %d", resp.StatusCode)
+	}
+
+	var out BankRefundResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("%w: decode refund response: %v", ErrAmbiguous, err)
+	}
+	return &out, nil
+}
+
 // Lookup queries the processor's transaction log by reference. This is how
 // reconciliation resolves a charge left in requires_reconciliation (§24.3) —
 // query-before-retry, never guess.
