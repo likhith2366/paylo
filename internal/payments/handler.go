@@ -32,18 +32,14 @@ func (h *Handler) Routes(r chi.Router) {
 }
 
 type createChargeRequest struct {
-	Amount      int64          `json:"amount"`
-	Currency    string         `json:"currency"`
-	Card        cardPayload    `json:"card"`
-	Description string         `json:"description"`
-	Metadata    map[string]any `json:"metadata"`
-}
-
-type cardPayload struct {
-	Number   string `json:"number"`
-	ExpMonth int    `json:"exp_month"`
-	ExpYear  int    `json:"exp_year"`
-	CVC      string `json:"cvc"`
+	Amount   int64  `json:"amount"`
+	Currency string `json:"currency"`
+	// A vault token, never a card number. This endpoint has no field capable of
+	// carrying a PAN, which is what keeps the Payments API out of PCI scope
+	// (§2.4) — a merchant literally cannot send us one by mistake.
+	PaymentToken string         `json:"payment_token"`
+	Description  string         `json:"description"`
+	Metadata     map[string]any `json:"metadata"`
 }
 
 func (h *Handler) createCharge(w http.ResponseWriter, r *http.Request) {
@@ -96,9 +92,21 @@ func (h *Handler) createCharge(w http.ResponseWriter, r *http.Request) {
 			"invalid_currency", "Currency must be a 3-letter ISO 4217 code.", "currency")
 		return
 	}
-	if req.Card.Number == "" {
+	if req.PaymentToken == "" {
 		httpx.FailParam(w, http.StatusBadRequest, httpx.TypeInvalidRequest,
-			"missing_card", "A card number is required.", "card.number")
+			"missing_payment_token",
+			"A payment_token is required. Collect card details with the hosted "+
+				"checkout widget, which exchanges them for a token.", "payment_token")
+		return
+	}
+	// A merchant sending a raw PAN would drag their integration — and us — into
+	// full PCI scope. Reject it loudly and tell them what to do instead, rather
+	// than quietly ignoring the field.
+	if looksLikeCardNumber(body) {
+		httpx.Fail(w, http.StatusBadRequest, httpx.TypeInvalidRequest,
+			"raw_card_data_rejected",
+			"This endpoint does not accept raw card details. Use the hosted "+
+				"checkout widget to obtain a payment_token.")
 		return
 	}
 
@@ -114,10 +122,7 @@ func (h *Handler) createCharge(w http.ResponseWriter, r *http.Request) {
 		MerchantID:        merchantID,
 		AmountCents:       req.Amount,
 		Currency:          strings.ToUpper(req.Currency),
-		CardNumber:        req.Card.Number,
-		CardExpMonth:      req.Card.ExpMonth,
-		CardExpYear:       req.Card.ExpYear,
-		CardCVC:           req.Card.CVC,
+		PaymentToken:      req.PaymentToken,
 		Description:       req.Description,
 		Metadata:          req.Metadata,
 		DeviceFingerprint: r.Header.Get("X-Device-Fingerprint"),
@@ -143,14 +148,18 @@ func (h *Handler) createCharge(w http.ResponseWriter, r *http.Request) {
 			"This Idempotency-Key was already used with a different request body.")
 		return
 
-	case errors.Is(err, ErrInvalidCardNumber):
-		httpx.FailParam(w, http.StatusBadRequest, httpx.TypeCard, "invalid_number",
-			"The card number is not valid.", "card.number")
+	case errors.Is(err, ErrMissingToken):
+		httpx.FailParam(w, http.StatusBadRequest, httpx.TypeInvalidRequest,
+			"missing_payment_token", "A payment_token is required.", "payment_token")
 		return
 
-	case errors.Is(err, ErrInvalidLength):
-		httpx.FailParam(w, http.StatusBadRequest, httpx.TypeCard, "invalid_number_length",
-			"The card number length is not valid for its network.", "card.number")
+	case errors.Is(err, ErrTokenUnusable):
+		// Covers not-found, expired, and already-consumed alike. They are
+		// reported identically so the endpoint cannot be used to probe which
+		// tokens exist or have been spent.
+		httpx.FailParam(w, http.StatusBadRequest, httpx.TypeCard, "invalid_payment_token",
+			"The payment token is invalid, expired, or has already been used.",
+			"payment_token")
 		return
 
 	case errors.Is(err, ErrInvalidAmount):
@@ -199,6 +208,34 @@ func (h *Handler) getCharge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, charge)
+}
+
+// looksLikeCardNumber reports whether a request body appears to contain a PAN.
+//
+// A guard, not a security control — a determined caller can evade it. Its job
+// is to catch the honest mistake of a merchant posting card details directly,
+// and to fail that request before the data reaches a log or the database.
+//
+// Deliberately checks for a Luhn-valid run of digits rather than just the
+// presence of a "number" field, so an order ID or a phone number in metadata
+// doesn't trip it.
+func looksLikeCardNumber(body []byte) bool {
+	var run []byte
+	for i := 0; i <= len(body); i++ {
+		if i < len(body) && body[i] >= '0' && body[i] <= '9' {
+			run = append(run, body[i])
+			continue
+		}
+		// Separators inside a formatted card number shouldn't break the run.
+		if i < len(body) && (body[i] == ' ' || body[i] == '-') && len(run) > 0 {
+			continue
+		}
+		if len(run) >= 13 && len(run) <= 19 && Luhn(string(run)) {
+			return true
+		}
+		run = run[:0]
+	}
+	return false
 }
 
 // clientIP prefers the left-most X-Forwarded-For entry, which is the original

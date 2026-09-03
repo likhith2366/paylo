@@ -21,6 +21,71 @@ import (
 
 const testSalt = "test-salt"
 
+// fakeVault stands in for the vault service. It holds card numbers in memory
+// so tests can drive the charge flow without running the vault, while keeping
+// the same contract: metadata is freely readable, single-use tokens are
+// consumed exactly once, and the PAN is only available via Detokenize.
+type fakeVault struct {
+	mu              sync.Mutex
+	cards           map[string]string // token -> PAN
+	consumed        map[string]bool
+	detokenizeCalls atomic.Int64
+}
+
+func newFakeVault() *fakeVault {
+	return &fakeVault{cards: map[string]string{}, consumed: map[string]bool{}}
+}
+
+// issue mints a token for a card, mirroring what the vault's tokenize endpoint
+// would return.
+func (f *fakeVault) issue(token, pan string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cards[token] = pan
+	return token
+}
+
+func (f *fakeVault) Metadata(_ context.Context, token string) (*payments.CardMetadata, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pan, ok := f.cards[token]
+	if !ok {
+		return nil, payments.ErrTokenUnusable
+	}
+	// Rejecting a consumed token here mirrors the real vault. An earlier
+	// version of this fake did not, and that single divergence hid a live bug:
+	// the retry path called Metadata before claiming the idempotency key, so a
+	// retry failed against the real vault while passing against this fake.
+	// A fake more permissive than the real thing is worse than no fake.
+	if f.consumed[token] {
+		return nil, payments.ErrTokenUnusable
+	}
+	return &payments.CardMetadata{
+		Brand:       string(payments.DetectNetwork(pan)),
+		Last4:       payments.Last4(pan),
+		BIN:         payments.BIN(pan),
+		Fingerprint: payments.Fingerprint(pan, testSalt),
+		ExpMonth:    12,
+		ExpYear:     2030,
+	}, nil
+}
+
+func (f *fakeVault) Detokenize(_ context.Context, token, _, _ string) (string, error) {
+	f.detokenizeCalls.Add(1)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pan, ok := f.cards[token]
+	if !ok {
+		return "", payments.ErrTokenUnusable
+	}
+	if f.consumed[token] {
+		return "", payments.ErrTokenUnusable
+	}
+	f.consumed[token] = true
+	return pan, nil
+}
+
 // fakeBank counts how many times it was actually asked to authorize a charge.
 // This counter is the real assertion in the concurrency test: no matter what
 // the API returns, the customer's card must be hit exactly once.
@@ -68,20 +133,17 @@ func writeJSON(w http.ResponseWriter, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func newService(t *testing.T, pool *pgxpool.Pool, bank *fakeBank) *payments.Service {
+func newService(t *testing.T, pool *pgxpool.Pool, bank *fakeBank, v *fakeVault) *payments.Service {
 	t.Helper()
-	return payments.NewService(pool, payments.NewBankClient(bank.server.URL, 10*time.Second), testSalt)
+	return payments.NewService(pool, payments.NewBankClient(bank.server.URL, 10*time.Second), v)
 }
 
-func chargeInput(merchantID uuid.UUID) payments.ChargeInput {
+func chargeInput(merchantID uuid.UUID, token string) payments.ChargeInput {
 	return payments.ChargeInput{
 		MerchantID:   merchantID,
 		AmountCents:  10_000,
 		Currency:     "USD",
-		CardNumber:   "4242424242424242",
-		CardExpMonth: 12,
-		CardExpYear:  2030,
-		CardCVC:      "123",
+		PaymentToken: token,
 	}
 }
 
@@ -104,7 +166,9 @@ func TestConcurrentDuplicateIdempotencyKey(t *testing.T) {
 
 	// A slow bank keeps the winner "processing" while the other 99 arrive.
 	bank := newFakeBank(t, 150*time.Millisecond)
-	svc := newService(t, pool, bank)
+	vlt := newFakeVault()
+	token := vlt.issue("tok_concurrent", "4242424242424242")
+	svc := newService(t, pool, bank, vlt)
 
 	const attempts = 100
 	const idemKey = "idem_concurrent_burst_001"
@@ -130,7 +194,7 @@ func TestConcurrentDuplicateIdempotencyKey(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start // release all at once
-			c, status, err := svc.CreateCharge(ctx, chargeInput(merchantID), idemKey, requestHash, body)
+			c, status, err := svc.CreateCharge(ctx, chargeInput(merchantID, token), idemKey, requestHash, body)
 			results[i] = result{charge: c, status: status, err: err}
 		}(i)
 	}
@@ -202,13 +266,15 @@ func TestSequentialRetryReplaysIdenticalResponse(t *testing.T) {
 	merchantID := testsupport.CreateMerchant(t, pool, "acme")
 
 	bank := newFakeBank(t, 0)
-	svc := newService(t, pool, bank)
+	vlt := newFakeVault()
+	token := vlt.issue("tok_retry", "4242424242424242")
+	svc := newService(t, pool, bank, vlt)
 
 	body := []byte(`{"amount":10000,"currency":"USD"}`)
 	hash, _ := idempotency.HashRequest(body)
 	const idemKey = "idem_sequential_retry_001"
 
-	first, firstStatus, err := svc.CreateCharge(ctx, chargeInput(merchantID), idemKey, hash, body)
+	first, firstStatus, err := svc.CreateCharge(ctx, chargeInput(merchantID, token), idemKey, hash, body)
 	if err != nil {
 		t.Fatalf("first attempt: %v", err)
 	}
@@ -218,7 +284,7 @@ func TestSequentialRetryReplaysIdenticalResponse(t *testing.T) {
 
 	// The client never saw that response. It retries, five times over.
 	for i := 0; i < 5; i++ {
-		replay, replayStatus, err := svc.CreateCharge(ctx, chargeInput(merchantID), idemKey, hash, body)
+		replay, replayStatus, err := svc.CreateCharge(ctx, chargeInput(merchantID, token), idemKey, hash, body)
 		if err != nil {
 			t.Fatalf("retry %d: %v", i, err)
 		}
@@ -239,23 +305,110 @@ func TestSequentialRetryReplaysIdenticalResponse(t *testing.T) {
 	assertSingleCharge(t, pool, merchantID)
 }
 
+// Regression: a retry must replay even though the first attempt consumed the
+// single-use vault token.
+//
+// This failed once. CreateCharge fetched vault metadata before claiming the
+// idempotency key, so a retry hit "token already consumed" — a precondition the
+// FIRST attempt had legitimately changed — and returned an error instead of the
+// original response. A merchant retrying a lost response would have concluded
+// the charge failed when it had actually succeeded.
+//
+// The rule this pins: the idempotency claim is the outermost operation, and a
+// retry re-executes no precondition that the first attempt could have altered.
+func TestRetryReplaysAfterSingleUseTokenConsumed(t *testing.T) {
+	pool := testsupport.NewPostgres(t)
+	ctx := context.Background()
+	merchantID := testsupport.CreateMerchant(t, pool, "acme")
+
+	bank := newFakeBank(t, 0)
+	vlt := newFakeVault()
+	token := vlt.issue("tok_single_use", "4242424242424242")
+	svc := newService(t, pool, bank, vlt)
+
+	body := []byte(`{"amount":10000,"currency":"USD"}`)
+	hash, _ := idempotency.HashRequest(body)
+	const idemKey = "idem_token_consumed_001"
+
+	first, firstStatus, err := svc.CreateCharge(ctx, chargeInput(merchantID, token), idemKey, hash, body)
+	if err != nil {
+		t.Fatalf("first charge: %v", err)
+	}
+	if first.Status != payments.StatusSucceeded {
+		t.Fatalf("first charge status = %q, want succeeded", first.Status)
+	}
+
+	// The token is now spent. The retry must still replay the original response.
+	replay, replayStatus, err := svc.CreateCharge(ctx, chargeInput(merchantID, token), idemKey, hash, body)
+	if err != nil {
+		t.Fatalf("retry after the token was consumed must replay, got error: %v", err)
+	}
+	if replay.ID != first.ID {
+		t.Errorf("retry returned charge %s, want %s", replay.ID, first.ID)
+	}
+	if replay.Status != payments.StatusSucceeded || replayStatus != firstStatus {
+		t.Errorf("retry returned %q/%d, want %q/%d",
+			replay.Status, replayStatus, first.Status, firstStatus)
+	}
+
+	// The replay must not have consulted the vault at all.
+	if got := vlt.detokenizeCalls.Load(); got != 1 {
+		t.Errorf("vault detokenize called %d times, want 1", got)
+	}
+	if got := bank.authCalls.Load(); got != 1 {
+		t.Errorf("bank called %d times, want 1", got)
+	}
+	assertSingleCharge(t, pool, merchantID)
+}
+
+// An unusable token must produce a terminal, replayable failure rather than
+// leaving the claimed key stuck in 'processing' until its lock goes stale.
+func TestUnusableTokenFailsTerminally(t *testing.T) {
+	pool := testsupport.NewPostgres(t)
+	ctx := context.Background()
+	merchantID := testsupport.CreateMerchant(t, pool, "acme")
+	svc := newService(t, pool, newFakeBank(t, 0), newFakeVault())
+
+	body := []byte(`{"amount":10000,"currency":"USD"}`)
+	hash, _ := idempotency.HashRequest(body)
+
+	_, _, err := svc.CreateCharge(ctx, chargeInput(merchantID, "tok_never_issued"), "bad_token_key", hash, body)
+	if !errors.Is(err, payments.ErrTokenUnusable) {
+		t.Fatalf("expected ErrTokenUnusable, got %v", err)
+	}
+
+	// The immediate retry must replay the failure, not return 409 in-flight.
+	charge, status, err := svc.CreateCharge(ctx, chargeInput(merchantID, "tok_never_issued"), "bad_token_key", hash, body)
+	if err != nil {
+		t.Fatalf("retry should replay the stored failure, got: %v", err)
+	}
+	if charge.Status != payments.StatusFailed {
+		t.Errorf("replayed status = %q, want failed", charge.Status)
+	}
+	if status != 400 {
+		t.Errorf("replayed HTTP status = %d, want 400", status)
+	}
+}
+
 // Reusing a key for a genuinely different request is a client bug, and
 // replaying the old response would silently hide it (§4.2).
 func TestKeyReuseWithDifferentBodyRejected(t *testing.T) {
 	pool := testsupport.NewPostgres(t)
 	ctx := context.Background()
 	merchantID := testsupport.CreateMerchant(t, pool, "acme")
-	svc := newService(t, pool, newFakeBank(t, 0))
+	vlt := newFakeVault()
+	token := vlt.issue("tok_reuse", "4242424242424242")
+	svc := newService(t, pool, newFakeBank(t, 0), vlt)
 
 	bodyA := []byte(`{"amount":10000,"currency":"USD"}`)
 	hashA, _ := idempotency.HashRequest(bodyA)
-	if _, _, err := svc.CreateCharge(ctx, chargeInput(merchantID), "reused_key", hashA, bodyA); err != nil {
+	if _, _, err := svc.CreateCharge(ctx, chargeInput(merchantID, token), "reused_key", hashA, bodyA); err != nil {
 		t.Fatalf("first charge: %v", err)
 	}
 
 	bodyB := []byte(`{"amount":99999,"currency":"USD"}`)
 	hashB, _ := idempotency.HashRequest(bodyB)
-	in := chargeInput(merchantID)
+	in := chargeInput(merchantID, token)
 	in.AmountCents = 99_999
 
 	_, _, err := svc.CreateCharge(ctx, in, "reused_key", hashB, bodyB)
@@ -293,9 +446,11 @@ func TestDeclinedChargeIsIdempotentAndPostsNoLedgerEntries(t *testing.T) {
 	merchantID := testsupport.CreateMerchant(t, pool, "acme")
 
 	bank := newFakeBank(t, 0)
-	svc := newService(t, pool, bank)
+	vlt := newFakeVault()
+	token := vlt.issue("tok_decline", "4242424242424242")
+	svc := newService(t, pool, bank, vlt)
 
-	in := chargeInput(merchantID)
+	in := chargeInput(merchantID, token)
 	in.SimulateOutcome = "decline"
 	body := []byte(`{"amount":10000,"currency":"USD","outcome":"decline"}`)
 	hash, _ := idempotency.HashRequest(body)
@@ -334,12 +489,14 @@ func TestSuccessfulChargePostsBalancedLedger(t *testing.T) {
 	pool := testsupport.NewPostgres(t)
 	ctx := context.Background()
 	merchantID := testsupport.CreateMerchant(t, pool, "acme")
-	svc := newService(t, pool, newFakeBank(t, 0))
+	vlt := newFakeVault()
+	token := vlt.issue("tok_ledger", "4242424242424242")
+	svc := newService(t, pool, newFakeBank(t, 0), vlt)
 
 	body := []byte(`{"amount":10000,"currency":"USD"}`)
 	hash, _ := idempotency.HashRequest(body)
 
-	charge, _, err := svc.CreateCharge(ctx, chargeInput(merchantID), "ledger_key", hash, body)
+	charge, _, err := svc.CreateCharge(ctx, chargeInput(merchantID, token), "ledger_key", hash, body)
 	if err != nil {
 		t.Fatalf("charge: %v", err)
 	}
@@ -405,12 +562,14 @@ func TestAmbiguousTimeoutMarksChargeForReconciliation(t *testing.T) {
 	}))
 	defer slow.Close()
 
-	svc := payments.NewService(pool, payments.NewBankClient(slow.URL, 300*time.Millisecond), testSalt)
+	vlt := newFakeVault()
+	token := vlt.issue("tok_ambiguous", "4242424242424242")
+	svc := payments.NewService(pool, payments.NewBankClient(slow.URL, 300*time.Millisecond), vlt)
 
 	body := []byte(`{"amount":10000,"currency":"USD"}`)
 	hash, _ := idempotency.HashRequest(body)
 
-	charge, status, err := svc.CreateCharge(ctx, chargeInput(merchantID), "ambiguous_key", hash, body)
+	charge, status, err := svc.CreateCharge(ctx, chargeInput(merchantID, token), "ambiguous_key", hash, body)
 	if err != nil {
 		t.Fatalf("charge: %v", err)
 	}
@@ -438,11 +597,13 @@ func TestChargeWritesOutboxEvent(t *testing.T) {
 	pool := testsupport.NewPostgres(t)
 	ctx := context.Background()
 	merchantID := testsupport.CreateMerchant(t, pool, "acme")
-	svc := newService(t, pool, newFakeBank(t, 0))
+	vlt := newFakeVault()
+	token := vlt.issue("tok_outbox", "4242424242424242")
+	svc := newService(t, pool, newFakeBank(t, 0), vlt)
 
 	body := []byte(`{"amount":10000,"currency":"USD"}`)
 	hash, _ := idempotency.HashRequest(body)
-	charge, _, err := svc.CreateCharge(ctx, chargeInput(merchantID), "outbox_key", hash, body)
+	charge, _, err := svc.CreateCharge(ctx, chargeInput(merchantID, token), "outbox_key", hash, body)
 	if err != nil {
 		t.Fatalf("charge: %v", err)
 	}
@@ -474,16 +635,19 @@ func TestIdempotencyKeysAreScopedPerMerchant(t *testing.T) {
 	merchantB := testsupport.CreateMerchant(t, pool, "beta")
 
 	bank := newFakeBank(t, 0)
-	svc := newService(t, pool, bank)
+	vlt := newFakeVault()
+	tokenA := vlt.issue("tok_alpha", "4242424242424242")
+	tokenB := vlt.issue("tok_beta", "5555555555554444")
+	svc := newService(t, pool, bank, vlt)
 
 	body := []byte(`{"amount":10000,"currency":"USD"}`)
 	hash, _ := idempotency.HashRequest(body)
 
-	chargeA, _, err := svc.CreateCharge(ctx, chargeInput(merchantA), "shared_key", hash, body)
+	chargeA, _, err := svc.CreateCharge(ctx, chargeInput(merchantA, tokenA), "shared_key", hash, body)
 	if err != nil {
 		t.Fatalf("merchant A: %v", err)
 	}
-	chargeB, _, err := svc.CreateCharge(ctx, chargeInput(merchantB), "shared_key", hash, body)
+	chargeB, _, err := svc.CreateCharge(ctx, chargeInput(merchantB, tokenB), "shared_key", hash, body)
 	if err != nil {
 		t.Fatalf("merchant B: %v", err)
 	}

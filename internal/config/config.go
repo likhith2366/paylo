@@ -14,6 +14,12 @@ type Config struct {
 	DatabaseURL     string
 	RedisURL        string
 	BankSimulatorURL string
+	VaultURL         string
+	// Shared secret for the vault's detokenize endpoint. Defence in depth only
+	// — the real control is that the endpoint is unreachable from outside the
+	// vault's network segment (§2.4).
+	VaultInternalSecret string
+	VaultTimeout        time.Duration
 	// Hard ceiling on the downstream processor call. Exceeding it produces the
 	// ambiguous-timeout case (§24.1): the charge is marked
 	// requires_reconciliation rather than blindly retried.
@@ -34,6 +40,9 @@ func Load() (Config, error) {
 		RedisURL:         env("REDIS_URL", "redis://localhost:6379/0"),
 		BankSimulatorURL: env("BANK_SIMULATOR_URL", "http://localhost:8090"),
 		BankTimeout:      envDuration("BANK_TIMEOUT", 5*time.Second),
+		VaultURL:         env("VAULT_URL", "http://localhost:8081"),
+		VaultInternalSecret: env("VAULT_INTERNAL_SECRET", "dev-only-internal-secret"),
+		VaultTimeout:        envDuration("VAULT_TIMEOUT", 3*time.Second),
 		DBMaxConns:       int32(envInt("DB_MAX_CONNS", 25)),
 		CardHashSalt:     env("CARD_HASH_SALT", ""),
 		LogLevel:         env("LOG_LEVEL", "info"),

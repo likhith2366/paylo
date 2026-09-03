@@ -101,6 +101,37 @@ services:
       timeout: 3s
       retries: 5
 
+  # The only service that ever sees a raw card number (§2.4). In production it
+  # runs in its own network segment with its own KMS key, reachable only by the
+  # checkout iframe and the charge-submission path — not by payments-api's
+  # general traffic, and never by the ledger or dashboard.
+  vault:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: vault
+    environment:
+      PORT: "8081"
+      PAYLO_ENV: development
+      DATABASE_URL: postgres://paylo:paylo@postgres:5432/paylo?sslmode=disable
+      # Development values. Production sources both from Secrets Manager, and
+      # the service refuses to start without them.
+      VAULT_MASTER_KEY: ${VAULT_MASTER_KEY:-}
+      VAULT_INTERNAL_SECRET: dev-only-internal-secret
+      VAULT_TOKEN_TTL: "15m"
+      CARD_HASH_SALT: dev-only-insecure-salt
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/healthcheck", "http://localhost:8081/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   payments-api:
     build:
       context: .
@@ -114,6 +145,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       BANK_SIMULATOR_URL: http://bank-simulator:8090
       BANK_TIMEOUT: "5s"
+      VAULT_URL: http://vault:8081
+      VAULT_INTERNAL_SECRET: dev-only-internal-secret
+      VAULT_TIMEOUT: "3s"
       CARD_HASH_SALT: dev-only-insecure-salt
       LOG_LEVEL: info
     ports:
@@ -123,6 +157,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      vault:
+        condition: service_started
       bank-simulator:
         condition: service_started
     healthcheck:

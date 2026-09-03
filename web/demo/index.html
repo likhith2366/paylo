@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Demo Merchant — PayFlow Checkout</title>
+<!--
+  A stand-in for a merchant's own checkout page.
+
+  The point of this page is what it CANNOT do. The card fields below live in an
+  iframe served from the vault's origin, so nothing here — no script, no
+  devtools expression, no XSS payload on this page — can read the card number.
+  All this page ever receives is an opaque token.
+
+  Serve it from any static server on an allowed origin:
+      python -m http.server 8000 --directory web/demo
+  then open http://localhost:8000
+-->
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    display: grid; place-items: center;
+    background: #f4f5f7; color: #1a1d23;
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #12141a; color: #e8eaed; }
+    .card { background: #1c1f26 !important; border-color: #2a2f3a !important; }
+    .line { border-color: #2a2f3a !important; }
+    pre { background: #12141a !important; border-color: #2a2f3a !important; }
+  }
+
+  .card {
+    width: min(430px, 92vw);
+    background: #fff;
+    border: 1px solid #e3e6ea;
+    border-radius: 14px;
+    padding: 26px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06), 0 8px 28px rgba(0,0,0,.05);
+  }
+  h1 { font-size: 19px; margin: 0 0 2px; }
+  .sub { color: #6b7280; font-size: 13px; margin: 0 0 20px; }
+
+  .line {
+    display: flex; justify-content: space-between;
+    padding: 9px 0; border-bottom: 1px solid #eceff2; font-size: 14px;
+  }
+  .line:last-of-type { border-bottom: 0; font-weight: 650; }
+
+  #mount { margin: 18px 0 4px; min-height: 168px; }
+
+  button {
+    width: 100%; padding: 12px; margin-top: 10px;
+    font: inherit; font-weight: 650; color: #fff;
+    background: #5b6be8; border: 0; border-radius: 8px; cursor: pointer;
+    transition: background .12s, opacity .12s;
+  }
+  button:hover:not(:disabled) { background: #4a59d4; }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+
+  pre {
+    margin: 14px 0 0; padding: 12px;
+    background: #f7f8fa; border: 1px solid #e3e6ea; border-radius: 8px;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-all;
+    max-height: 220px; overflow: auto;
+  }
+  .ok { color: #0a7d4b; }
+  .bad { color: #c0392b; }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>Demo Store</h1>
+  <p class="sub">A merchant page that cannot see card numbers.</p>
+
+  <div class="line"><span>Mechanical keyboard</span><span>$89.00</span></div>
+  <div class="line"><span>Shipping</span><span>$6.00</span></div>
+  <div class="line"><span>Total</span><span>$95.00</span></div>
+
+  <div id="mount"></div>
+  <button id="pay">Pay $95.00</button>
+
+  <pre id="log">Waiting for the secure frame…</pre>
+</div>
+
+<script src="http://localhost:8081/checkout/payflow.js"></script>
+<script>
+  var VAULT = 'http://localhost:8081';
+  var logEl = document.getElementById('log');
+  var payBtn = document.getElementById('pay');
+
+  function log(message, cls) {
+    var stamp = new Date().toLocaleTimeString();
+    logEl.innerHTML += '\n<span class="' + (cls || '') + '">' +
+      stamp + '  ' + message + '</span>';
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  var payflow = PayFlow('pk_test_demo', { vaultUrl: VAULT });
+  var card = payflow.createCardElement('#mount');
+
+  card.on('ready', function () {
+    logEl.textContent = 'Secure frame loaded from ' + VAULT;
+    log('Try 4242 4242 4242 4242 · any future expiry · any CVC');
+  });
+
+  card.on('change', function (e) {
+    if (e.network && e.network !== 'unknown') log('Detected network: ' + e.network);
+  });
+
+  payBtn.addEventListener('click', async function () {
+    payBtn.disabled = true;
+    log('Requesting token…');
+
+    var result = await card.tokenize();
+
+    if (result.error) {
+      log('Error: ' + result.error.message + ' (' + result.error.code + ')', 'bad');
+      payBtn.disabled = false;
+      return;
+    }
+
+    log('Token received: ' + result.token, 'ok');
+    log('Card: ' + result.brand + ' ····' + result.last4, 'ok');
+
+    // Proof of the boundary: this page holds the token and the last four, and
+    // has no way to obtain the number that produced them.
+    log('This page cannot read the card number — only this token.');
+    log('Next: your server POSTs the token to /v1/charges.');
+
+    payBtn.disabled = false;
+  });
+</script>
+</body>
+</html>

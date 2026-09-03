@@ -18,6 +18,7 @@ import (
 	"github.com/likhith2366/paylo/internal/db"
 	"github.com/likhith2366/paylo/internal/httpx"
 	"github.com/likhith2366/paylo/internal/payments"
+	"github.com/likhith2366/paylo/internal/vault"
 )
 
 func main() {
@@ -45,7 +46,10 @@ func run() error {
 	defer pool.Close()
 
 	bank := payments.NewBankClient(cfg.BankSimulatorURL, cfg.BankTimeout)
-	handler := payments.NewHandler(payments.NewService(pool, bank, cfg.CardHashSalt))
+	vaultClient := vault.NewPaymentsAdapter(
+		vault.NewClient(cfg.VaultURL, cfg.VaultInternalSecret, cfg.VaultTimeout),
+	)
+	handler := payments.NewHandler(payments.NewService(pool, bank, vaultClient))
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)

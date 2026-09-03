@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PayFlow Secure Card Input</title>
+<!--
+  The hosted card-input frame (§2.4).
+
+  This page is served from the vault's own origin and embedded in the
+  merchant's checkout page as an iframe. Because of the browser's same-origin
+  policy, the merchant's JavaScript cannot read anything inside this document —
+  including the card number the customer types. That single fact is the entire
+  PCI-scope-reduction strategy: the card data goes from this frame straight to
+  the vault, never touching the merchant's server or PayFlow's Payments API.
+
+  The card number never leaves this document except as a POST to the vault.
+  It is never put in a URL, never in postMessage, never in a parent-accessible
+  variable.
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: transparent;
+    --field-bg: #ffffff;
+    --border: #d4d8de;
+    --border-focus: #5b6be8;
+    --text: #1a1d23;
+    --muted: #6b7280;
+    --error: #c0392b;
+    --radius: 8px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --field-bg: #1c1f26;
+      --border: #363b45;
+      --border-focus: #7c88f0;
+      --text: #e8eaed;
+      --muted: #9aa1ab;
+      --error: #f07167;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  .row { display: flex; gap: 10px; }
+  .field { position: relative; margin-bottom: 12px; flex: 1; }
+  .field label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    margin-bottom: 5px;
+    letter-spacing: .01em;
+  }
+
+  input {
+    width: 100%;
+    padding: 11px 12px;
+    font: inherit;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: .02em;
+    color: var(--text);
+    background: var(--field-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    transition: border-color .12s, box-shadow .12s;
+  }
+  input:focus {
+    outline: none;
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--border-focus) 22%, transparent);
+  }
+  input.invalid { border-color: var(--error); }
+
+  /* Room for the network badge inside the number field. */
+  #number { padding-right: 62px; }
+
+  .badge {
+    position: absolute;
+    right: 10px;
+    top: 27px;
+    height: 22px;
+    padding: 0 7px;
+    display: none;
+    align-items: center;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: #fff;
+    border-radius: 4px;
+  }
+  .badge.show { display: inline-flex; }
+  .badge[data-network="visa"]       { background: #1a1f71; }
+  .badge[data-network="mastercard"] { background: #cc5500; }
+  .badge[data-network="amex"]       { background: #006fcf; }
+  .badge[data-network="discover"]   { background: #d97706; }
+  .badge[data-network="rupay"]      { background: #097969; }
+
+  .error {
+    min-height: 15px;
+    font-size: 12px;
+    color: var(--error);
+    margin-top: 4px;
+  }
+  .hint {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+</style>
+</head>
+<body>
+
+<form id="form" novalidate autocomplete="on">
+  <div class="field">
+    <label for="number">Card number</label>
+    <input id="number" name="number" inputmode="numeric" autocomplete="cc-number"
+           placeholder="1234 5678 9012 3456" aria-describedby="number-error">
+    <span class="badge" id="badge" aria-live="polite"></span>
+    <div class="error" id="number-error" role="alert"></div>
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label for="expiry">Expiry</label>
+      <input id="expiry" name="expiry" inputmode="numeric" autocomplete="cc-exp"
+             placeholder="MM / YY" maxlength="7" aria-describedby="expiry-error">
+      <div class="error" id="expiry-error" role="alert"></div>
+    </div>
+    <div class="field">
+      <label for="cvc">Security code</label>
+      <input id="cvc" name="cvc" inputmode="numeric" autocomplete="cc-csc"
+             placeholder="123" maxlength="4" aria-describedby="cvc-error">
+      <div class="error" id="cvc-error" role="alert"></div>
+    </div>
+  </div>
+
+  <div class="hint">
+    <svg width="11" height="13" viewBox="0 0 11 13" fill="currentColor" aria-hidden="true">
+      <path d="M5.5 0L0 2v4.2C0 9.4 2.3 12.3 5.5 13c3.2-.7 5.5-3.6 5.5-6.8V2L5.5 0z" opacity=".85"/>
+    </svg>
+    Card details go directly to PayFlow — this merchant never sees them.
+  </div>
+</form>
+
+<script type="module">
+import { detectNetwork, formatNumber, onlyDigits, validateCard,
+         cvcLength, maxLength, NETWORKS } from './card.js';
+
+const els = {
+  form: document.getElementById('form'),
+  number: document.getElementById('number'),
+  expiry: document.getElementById('expiry'),
+  cvc: document.getElementById('cvc'),
+  badge: document.getElementById('badge'),
+};
+
+// The parent origin is supplied by payflow.js in the iframe URL and is the ONLY
+// origin we will ever postMessage to. Never '*' — that would broadcast the
+// token (and any error detail) to whatever page happens to be listening.
+const params = new URLSearchParams(location.search);
+const parentOrigin = params.get('origin') || '';
+const merchantId = params.get('merchant_id') || '';
+const vaultBase = params.get('vault') || '';
+
+let network = NETWORKS.UNKNOWN;
+
+function post(type, payload = {}) {
+  if (!parentOrigin) return;
+  parent.postMessage({ source: 'payflow-checkout', type, ...payload }, parentOrigin);
+}
+
+function setError(field, message) {
+  document.getElementById(`${field}-error`).textContent = message || '';
+  els[field].classList.toggle('invalid', Boolean(message));
+}
+
+// --- live formatting and network detection --------------------------------
+
+els.number.addEventListener('input', () => {
+  const before = els.number.selectionStart;
+  const rawLength = els.number.value.length;
+
+  network = detectNetwork(els.number.value);
+  els.number.value = formatNumber(els.number.value, network);
+
+  // Keep the caret sensible when spaces are inserted ahead of it, so typing
+  // mid-number doesn't jump the cursor to the end.
+  const delta = els.number.value.length - rawLength;
+  if (before !== null && before < rawLength) {
+    els.number.setSelectionRange(before + delta, before + delta);
+  }
+
+  if (network === NETWORKS.UNKNOWN) {
+    els.badge.classList.remove('show');
+  } else {
+    els.badge.textContent = network === NETWORKS.AMEX ? 'AMEX' : network;
+    els.badge.dataset.network = network;
+    els.badge.classList.add('show');
+  }
+
+  els.cvc.maxLength = cvcLength(network);
+  setError('number', '');
+
+  // Advance to expiry once the number is complete — the small courtesy that
+  // makes a card form feel finished.
+  if (onlyDigits(els.number.value).length === maxLength(network)) {
+    els.expiry.focus();
+  }
+  post('change', { network, empty: onlyDigits(els.number.value).length === 0 });
+});
+
+els.expiry.addEventListener('input', () => {
+  let digits = onlyDigits(els.expiry.value).slice(0, 4);
+  // A leading digit above 1 can only be a single-digit month: 4 → 04.
+  if (digits.length === 1 && digits > '1') digits = '0' + digits;
+  els.expiry.value = digits.length > 2 ? `${digits.slice(0, 2)} / ${digits.slice(2)}` : digits;
+  setError('expiry', '');
+  if (digits.length === 4) els.cvc.focus();
+});
+
+els.cvc.addEventListener('input', () => {
+  els.cvc.value = onlyDigits(els.cvc.value).slice(0, cvcLength(network));
+  setError('cvc', '');
+});
+
+function parseExpiry() {
+  const digits = onlyDigits(els.expiry.value);
+  return {
+    month: parseInt(digits.slice(0, 2), 10) || 0,
+    year: digits.length >= 4 ? 2000 + parseInt(digits.slice(2, 4), 10) : 0,
+  };
+}
+
+// --- tokenization ----------------------------------------------------------
+
+async function tokenize() {
+  const { month, year } = parseExpiry();
+  const card = {
+    number: onlyDigits(els.number.value),
+    expMonth: month,
+    expYear: year,
+    cvc: els.cvc.value,
+  };
+
+  const { valid, errors } = validateCard(card);
+  setError('number', errors.number);
+  setError('expiry', errors.expiry);
+  setError('cvc', errors.cvc);
+
+  if (!valid) {
+    post('error', { code: 'validation_failed', message: 'Please check the card details.' });
+    return;
+  }
+
+  try {
+    const resp = await fetch(`${vaultBase}/vault/tokenize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        number: card.number,
+        exp_month: card.expMonth,
+        exp_year: card.expYear,
+        merchant_id: merchantId || undefined,
+        single_use: true,
+      }),
+    });
+
+    const body = await resp.json();
+
+    if (!resp.ok) {
+      const message = body?.error?.message || 'The card could not be processed.';
+      if (body?.error?.param === 'number') setError('number', message);
+      post('error', { code: body?.error?.code || 'tokenization_failed', message });
+      return;
+    }
+
+    // Only the token crosses the frame boundary — never the card number.
+    // The CVC is deliberately not tokenized or stored: PCI prohibits storing
+    // it, so it is passed to the processor at charge time and nowhere else.
+    post('token', {
+      token: body.token,
+      brand: body.brand,
+      last4: body.last4,
+      expMonth: body.exp_month,
+      expYear: body.exp_year,
+    });
+
+    // Clear the fields once tokenized so the PAN does not linger in the DOM.
+    els.form.reset();
+    els.badge.classList.remove('show');
+  } catch (err) {
+    // The caught error may reference the request; never forward its detail.
+    post('error', { code: 'network_error', message: 'Could not reach PayFlow. Please try again.' });
+  }
+}
+
+// --- parent messaging ------------------------------------------------------
+
+window.addEventListener('message', (event) => {
+  // Reject anything not from the exact parent origin we were configured with.
+  // Without this check, any page could drive this frame.
+  if (event.origin !== parentOrigin) return;
+  if (event.data?.source !== 'payflow-parent') return;
+
+  switch (event.data.type) {
+    case 'tokenize':
+      tokenize();
+      break;
+    case 'focus':
+      els.number.focus();
+      break;
+    case 'clear':
+      els.form.reset();
+      els.badge.classList.remove('show');
+      break;
+  }
+});
+
+// Report height so the parent can size the iframe to its content.
+const reportHeight = () => post('resize', { height: document.body.scrollHeight });
+new ResizeObserver(reportHeight).observe(document.body);
+
+post('ready');
+</script>
+</body>
+</html>
