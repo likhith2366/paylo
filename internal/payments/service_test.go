@@ -153,7 +153,7 @@ func writeJSON(w http.ResponseWriter, body any) {
 
 func newService(t *testing.T, pool *pgxpool.Pool, bank *fakeBank, v *fakeVault) *payments.Service {
 	t.Helper()
-	return payments.NewService(pool, payments.NewBankClient(bank.server.URL, 10*time.Second), v)
+	return payments.NewService(pool, payments.NewBankClient(bank.server.URL, 10*time.Second), v, nil)
 }
 
 func chargeInput(merchantID uuid.UUID, token string) payments.ChargeInput {
@@ -582,7 +582,7 @@ func TestAmbiguousTimeoutMarksChargeForReconciliation(t *testing.T) {
 
 	vlt := newFakeVault()
 	token := vlt.issue("tok_ambiguous", "4242424242424242")
-	svc := payments.NewService(pool, payments.NewBankClient(slow.URL, 300*time.Millisecond), vlt)
+	svc := payments.NewService(pool, payments.NewBankClient(slow.URL, 300*time.Millisecond), vlt, nil)
 
 	body := []byte(`{"amount":10000,"currency":"USD"}`)
 	hash, _ := idempotency.HashRequest(body)

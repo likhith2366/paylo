@@ -15,6 +15,7 @@ import (
 	"github.com/likhith2366/paylo/internal/idempotency"
 	"github.com/likhith2366/paylo/internal/ledger"
 	"github.com/likhith2366/paylo/internal/money"
+	"github.com/likhith2366/paylo/internal/risk"
 )
 
 // Charge statuses.
@@ -52,16 +53,27 @@ type CardMetadata struct {
 	ExpYear     int    `json:"exp_year"`
 }
 
+// RiskAssessor scores a charge before it reaches the processor (§14.1).
+//
+// An interface so this package does not depend on the risk package, and so
+// tests can drive specific verdicts. A nil assessor means risk checking is
+// disabled entirely — valid for tests, never for production.
+type RiskAssessor interface {
+	Assess(ctx context.Context, txn risk.Transaction) risk.Decision
+	RecordOutcome(ctx context.Context, txn risk.Transaction, declined bool)
+}
+
 type Service struct {
 	pool  *pgxpool.Pool
 	bank  *BankClient
 	vault VaultClient
+	risk  RiskAssessor
 	// feeBps is the platform fee in basis points (100 bps = 1%).
 	feeBps int64
 }
 
-func NewService(pool *pgxpool.Pool, bank *BankClient, vaultClient VaultClient) *Service {
-	return &Service{pool: pool, bank: bank, vault: vaultClient, feeBps: 290}
+func NewService(pool *pgxpool.Pool, bank *BankClient, vaultClient VaultClient, assessor RiskAssessor) *Service {
+	return &Service{pool: pool, bank: bank, vault: vaultClient, risk: assessor, feeBps: 290}
 }
 
 type ChargeInput struct {
@@ -227,6 +239,67 @@ func (s *Service) CreateCharge(ctx context.Context, in ChargeInput, idemKey, req
 		return nil, 0, err
 	}
 
+	// --- risk assessment (§14.1) ----------------------------------------------
+	//
+	// Sits after the idempotency claim and before the processor call: a
+	// declined-for-risk charge must never reach the bank, and a retry must
+	// replay the decline rather than re-score it (a second scoring could
+	// legitimately reach a different verdict as velocity counters move, which
+	// would make the same request non-idempotent).
+	riskTxn := risk.Transaction{
+		MerchantID:      in.MerchantID.String(),
+		AmountCents:     in.AmountCents,
+		Currency:        amount.Currency,
+		CardFingerprint: card.Fingerprint,
+		CardBIN:         card.BIN,
+		CardBrand:       card.Brand,
+		IPAddress:       in.IPAddress,
+		DeviceID:        in.DeviceFingerprint,
+		Timestamp:       time.Now().UTC(),
+	}
+
+	var decision risk.Decision
+	if s.risk != nil {
+		decision = s.risk.Assess(ctx, riskTxn)
+
+		if err := s.recordRisk(ctx, chargeID, decision); err != nil {
+			// The assessment is an audit record, not a gate. Failing to store
+			// it must not fail the charge.
+			slog.Warn("payments: failed to record risk assessment",
+				"charge_id", chargeID, "error", err)
+		}
+
+		if decision.Level == risk.LevelHigh {
+			slog.Info("payments: charge declined by risk engine",
+				"charge_id", chargeID, "score", decision.Score,
+				"rules", decision.RulesFired, "model_skipped", decision.ModelSkipped)
+
+			// Counts as a decline for velocity: a fraudster's blocked attempts
+			// are exactly the signal that catches the next one.
+			s.risk.RecordOutcome(ctx, riskTxn, true)
+
+			// A deliberately vague message. Telling the cardholder which rule
+			// caught them tells a fraudster what to change; the merchant sees
+			// the detail on the charge record and in the dashboard.
+			if err := s.finalize(ctx, chargeID, idemRecordID, StatusFailed,
+				"risk_declined", "This payment was declined by our fraud checks.",
+				"", nil, in, card, amount); err != nil {
+				return nil, 0, err
+			}
+			return &Charge{
+				ID: chargeID, Object: "charge", AmountCents: in.AmountCents,
+				Currency: amount.Currency, Status: StatusFailed,
+				FailureCode: "risk_declined", FailureMessage: "This payment was declined by our fraud checks.",
+				CardLast4: card.Last4, CardBrand: card.Brand,
+				Metadata: orEmptyMapGo(in.Metadata), CreatedAt: time.Now().UTC(),
+			}, 402, nil
+		}
+	}
+
+	// A medium verdict currently proceeds with the assessment recorded. The
+	// faithful behaviour is a 3DS step-up (§16), which needs the requires_action
+	// state machine — the idempotency layer already has the status for it.
+
 	// --- the PAN's only appearance outside the vault --------------------------
 	//
 	// Fetched here, immediately before submission, and held in a local variable
@@ -293,6 +366,11 @@ func (s *Service) CreateCharge(ctx context.Context, in ChargeInput, idemKey, req
 		}, 502, nil
 	}
 
+	// Feed the outcome back into velocity, whatever it was.
+	if s.risk != nil {
+		s.risk.RecordOutcome(ctx, riskTxn, bankErr != nil || (bankResp != nil && bankResp.Status == "declined"))
+	}
+
 	if bankResp.Status == "declined" {
 		if err := s.finalize(ctx, chargeID, idemRecordID, StatusFailed,
 			bankResp.DeclineCode, bankResp.DeclineMessage, bankResp.ProcessorReference,
@@ -323,6 +401,41 @@ func (s *Service) CreateCharge(ctx context.Context, in ChargeInput, idemKey, req
 		LedgerTxnID: &ledgerTxnID, ProcessorRef: bankResp.ProcessorReference,
 		Metadata: orEmptyMapGo(in.Metadata), CreatedAt: time.Now().UTC(),
 	}, 200, nil
+}
+
+// recordRisk stores the assessment on the charge so a decision can be explained
+// months later during a dispute or an audit (§14.5).
+//
+// Written outside the finalize transaction deliberately: this is an audit
+// record, and a failure to store it must never roll back or block the charge
+// it describes.
+func (s *Service) recordRisk(ctx context.Context, chargeID uuid.UUID, d risk.Decision) error {
+	rules, err := json.Marshal(d.RulesFired)
+	if err != nil {
+		return fmt.Errorf("payments: marshal fired rules: %w", err)
+	}
+
+	// The rule score is 0-100; risk_score is NUMERIC(5,4), so the model
+	// probability is stored when present and the rule score normalized
+	// otherwise.
+	score := d.Score / 100
+	if d.ModelScore != nil {
+		score = *d.ModelScore
+	}
+	if score > 1 {
+		score = 1
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		UPDATE charges
+		SET risk_score = $2, risk_level = $3, risk_rules_fired = $4, updated_at = now()
+		WHERE id = $1`,
+		chargeID, score, string(d.Level), rules,
+	)
+	if err != nil {
+		return fmt.Errorf("payments: record risk assessment: %w", err)
+	}
+	return nil
 }
 
 // failClaimed marks a claimed idempotency key as failed when the request cannot

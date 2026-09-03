@@ -18,7 +18,9 @@ import (
 	"github.com/likhith2366/paylo/internal/db"
 	"github.com/likhith2366/paylo/internal/httpx"
 	"github.com/likhith2366/paylo/internal/payments"
+	"github.com/likhith2366/paylo/internal/risk"
 	"github.com/likhith2366/paylo/internal/vault"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -49,7 +51,33 @@ func run() error {
 	vaultClient := vault.NewPaymentsAdapter(
 		vault.NewClient(cfg.VaultURL, cfg.VaultInternalSecret, cfg.VaultTimeout),
 	)
-	handler := payments.NewHandler(payments.NewService(pool, bank, vaultClient))
+
+	// Redis backs the velocity counters. A failure to connect is logged but not
+	// fatal: velocity rules go quiet without it, and the rest of the risk
+	// engine still runs. Refusing to start would turn a cache outage into a
+	// payments outage, which is precisely the coupling §14.3 warns against.
+	var counter *risk.Counter
+	if opts, err := redis.ParseURL(cfg.RedisURL); err != nil {
+		slog.Warn("payments-api: invalid REDIS_URL, velocity rules disabled", "error", err)
+	} else {
+		rdb := redis.NewClient(opts)
+		pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		if err := rdb.Ping(pingCtx).Err(); err != nil {
+			slog.Warn("payments-api: redis unreachable, velocity rules disabled", "error", err)
+		} else {
+			counter = risk.NewCounter(rdb)
+			defer rdb.Close()
+		}
+		cancel()
+	}
+
+	assessor := risk.NewService(
+		risk.NewEngine(nil),
+		counter,
+		risk.NewClient(cfg.FraudServiceURL, cfg.FraudTimeout),
+	)
+
+	handler := payments.NewHandler(payments.NewService(pool, bank, vaultClient, assessor))
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)

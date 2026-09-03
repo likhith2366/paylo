@@ -20,6 +20,10 @@ type Config struct {
 	// vault's network segment (§2.4).
 	VaultInternalSecret string
 	VaultTimeout        time.Duration
+	FraudServiceURL     string
+	// Tight on purpose: the risk step has ~100ms total, and a slow scorer is
+	// treated as a down one, falling back to the rule engine (§14.3).
+	FraudTimeout time.Duration
 	// Hard ceiling on the downstream processor call. Exceeding it produces the
 	// ambiguous-timeout case (§24.1): the charge is marked
 	// requires_reconciliation rather than blindly retried.
@@ -43,6 +47,8 @@ func Load() (Config, error) {
 		VaultURL:            env("VAULT_URL", "http://localhost:8081"),
 		VaultInternalSecret: env("VAULT_INTERNAL_SECRET", "dev-only-internal-secret"),
 		VaultTimeout:        envDuration("VAULT_TIMEOUT", 3*time.Second),
+		FraudServiceURL:     env("FRAUD_SERVICE_URL", "http://localhost:8000"),
+		FraudTimeout:        envDuration("FRAUD_TIMEOUT", 50*time.Millisecond),
 		DBMaxConns:          int32(envInt("DB_MAX_CONNS", 25)),
 		CardHashSalt:        env("CARD_HASH_SALT", ""),
 		LogLevel:            env("LOG_LEVEL", "info"),

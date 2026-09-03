@@ -167,6 +167,9 @@ services:
       VAULT_URL: http://vault:8081
       VAULT_INTERNAL_SECRET: dev-only-internal-secret
       VAULT_TIMEOUT: "3s"
+      FRAUD_SERVICE_URL: http://fraud-service:8000
+      # Tight: slow scoring is treated as unavailable and falls back to rules.
+      FRAUD_TIMEOUT: "50ms"
       CARD_HASH_SALT: dev-only-insecure-salt
       LOG_LEVEL: info
     ports:
