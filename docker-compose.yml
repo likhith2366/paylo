@@ -1,0 +1,136 @@
+# Local stack (§25.3) — the full system on a laptop, no AWS account required.
+#
+# LocalStack is the piece that makes this faithful rather than mocked: the Go
+# services call the real AWS SDK for SQS/SES/S3/Secrets Manager, just pointed at
+# localhost. The integration code under test is the same code that runs in
+# production, which is exactly the gap a hand-rolled mock leaves open.
+
+name: paylo
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: paylo
+      POSTGRES_PASSWORD: paylo
+      POSTGRES_DB: paylo
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Applied alphabetically on first boot of an empty data volume.
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paylo -d paylo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # appendonly keeps rate-limit and velocity counters across a restart.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Kafka-API compatible and far lighter than real Kafka for local dev (§25.3).
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda start
+      - --overprovisioned
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  localstack:
+    image: localstack/localstack:3.8
+    environment:
+      SERVICES: sqs,ses,s3,secretsmanager
+      DEBUG: "0"
+    ports:
+      - "4566:4566"
+    volumes:
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Catches "sent" email so tests can read an OTP out of a real inbox (§25.1).
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # web UI — http://localhost:8025
+
+  bank-simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: bank-simulator
+    environment:
+      PORT: "8090"
+      SIM_TIMEOUT_HOLD: "10s"
+      SIM_DELAY_HOLD: "30s"
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD", "/app/healthcheck", "http://localhost:8090/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  payments-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: payments-api
+    environment:
+      PORT: "8080"
+      PAYLO_ENV: development
+      DATABASE_URL: postgres://paylo:paylo@postgres:5432/paylo?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      BANK_SIMULATOR_URL: http://bank-simulator:8090
+      BANK_TIMEOUT: "5s"
+      CARD_HASH_SALT: dev-only-insecure-salt
+      LOG_LEVEL: info
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      bank-simulator:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/app/healthcheck", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:
+  redisdata:

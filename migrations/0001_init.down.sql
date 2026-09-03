@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS outbox_events;
+DROP TABLE IF EXISTS charges;
+DROP TABLE IF EXISTS ledger_balances;
+DROP TRIGGER IF EXISTS trg_ledger_balanced ON ledger_entries;
+DROP TRIGGER IF EXISTS trg_ledger_entries_no_update ON ledger_entries;
+DROP FUNCTION IF EXISTS ledger_balanced();
+DROP FUNCTION IF EXISTS ledger_entries_immutable();
+DROP TABLE IF EXISTS ledger_entries;
+DROP TABLE IF EXISTS accounts;
+DROP TABLE IF EXISTS idempotency_keys;
+DROP TABLE IF EXISTS api_keys;
+DROP TABLE IF EXISTS merchants;

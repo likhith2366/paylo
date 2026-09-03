@@ -1,0 +1,43 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+kaggle.json
+access_token
+*.pem
+*.key
+
+# ML data & artifacts (large, re-downloadable via `make ml-data`)
+ml/data/raw/
+ml/data/processed/
+ml/artifacts/
+*.csv
+*.zip
+*.parquet
+*.pkl
+*.joblib
+*.ubj
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Go
+/bin/
+*.exe
+*.test
+coverage.out
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
