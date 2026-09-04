@@ -204,14 +204,30 @@ func (s *Service) CreateCharge(ctx context.Context, in ChargeInput, idemKey, req
 	// of someone else's latency exhausts the connection pool under load.
 	card, err := s.vault.Metadata(ctx, in.PaymentToken)
 	if err != nil {
-		// The key is claimed but the token is unusable. Record the failure so
-		// the key reaches a terminal state and a retry replays this same error
-		// rather than hanging as 'processing' until the lock goes stale.
-		if ferr := s.failClaimed(ctx, chargeID, idemRecordID, in, amount,
-			"invalid_payment_token", "The payment token is invalid, expired, or has already been used."); ferr != nil {
-			return nil, 0, ferr
+		// Only a token that is genuinely unusable gets a terminal record.
+		//
+		// The distinction matters and was originally missing. A vault pod
+		// restarting returns 503, which is NOT ErrTokenUnusable — but the old
+		// code recorded any error as a permanent "invalid_payment_token"
+		// failure. The client's retry, which is exactly the right thing for
+		// them to do, would then replay that stored 400 forever: a valid token
+		// permanently unusable under that key, and a merchant told their token
+		// was bad when the vault had simply blinked.
+		if errors.Is(err, ErrTokenUnusable) {
+			if ferr := s.failClaimed(ctx, chargeID, idemRecordID, in, amount,
+				"invalid_payment_token", "The payment token is invalid, expired, or has already been used."); ferr != nil {
+				return nil, 0, ferr
+			}
+			return nil, 0, err
 		}
-		return nil, 0, err
+
+		// Transient. Release the claim so an immediate retry can proceed
+		// normally rather than getting 409 until the lock goes stale.
+		if rerr := s.releaseClaim(ctx, idemRecordID); rerr != nil {
+			slog.Error("payments: failed to release idempotency claim",
+				"charge_id", chargeID, "error", rerr)
+		}
+		return nil, 0, fmt.Errorf("payments: vault unavailable: %w", err)
 	}
 
 	// --- tx2: record intent ---------------------------------------------------
@@ -436,6 +452,15 @@ func (s *Service) recordRisk(ctx context.Context, chargeID uuid.UUID, d risk.Dec
 		return fmt.Errorf("payments: record risk assessment: %w", err)
 	}
 	return nil
+}
+
+// releaseClaim abandons a claim after a transient failure, so an immediate
+// retry starts fresh rather than replaying a failure that says nothing about
+// the request.
+func (s *Service) releaseClaim(ctx context.Context, idemRecordID uuid.UUID) error {
+	return db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+		return idempotency.Release(ctx, tx, idemRecordID)
+	})
 }
 
 // failClaimed marks a claimed idempotency key as failed when the request cannot

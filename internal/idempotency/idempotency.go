@@ -238,6 +238,30 @@ func Begin(ctx context.Context, tx pgx.Tx, merchantID uuid.UUID, key, endpoint, 
 	}
 }
 
+// Release abandons a claim without recording an outcome.
+//
+// For the case where a request failed for a reason that says nothing about the
+// request itself — a dependency was briefly unavailable — so there is no
+// meaningful response to replay. Deleting the row lets an immediate retry
+// proceed as a fresh attempt.
+//
+// The alternative, writing a terminal failure, would be wrong: it burns a
+// transient outage into a permanent answer, and the client's retry would
+// replay that failure forever under the same key. Leaving the row in
+// 'processing' would be wrong too — the client would get 409 until the lock
+// went stale, for a request nobody is actually working on.
+//
+// Only ever called on a row this caller just claimed, so there is no risk of
+// releasing someone else's in-flight work.
+func Release(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
+	_, err := tx.Exec(ctx,
+		`DELETE FROM idempotency_keys WHERE id = $1 AND status = 'processing'`, id)
+	if err != nil {
+		return fmt.Errorf("idempotency: release key %s: %w", id, err)
+	}
+	return nil
+}
+
 // Complete records the final response for a key.
 //
 // Must run in the SAME transaction as the business write it describes (§4.2

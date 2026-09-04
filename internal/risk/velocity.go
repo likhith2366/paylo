@@ -113,7 +113,14 @@ func (c *Counter) RecordCharge(ctx context.Context, fingerprint, ip, device, ema
 	if device != "" && fingerprint != "" {
 		key := deviceCardsKey(device)
 		pipe.SAdd(ctx, key, fingerprint)
-		pipe.Expire(ctx, key, windowDay)
+		// ExpireNX, for exactly the reason given above — and this one had real
+		// teeth. An unconditional Expire slid the window forward on every
+		// charge, so any device used at least once a day never expired and
+		// accumulated card fingerprints without bound. Past 3 distinct cards
+		// the device_card_cycling rule BLOCKS outright, so a shared family
+		// tablet or office terminal would eventually be declined permanently
+		// with no way to recover.
+		pipe.ExpireNX(ctx, key, windowDay)
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil {

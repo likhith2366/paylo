@@ -43,6 +43,15 @@ var (
 	ErrDisputeNotFound  = errors.New("payments: dispute not found")
 	ErrDisputeNotOpen   = errors.New("payments: dispute is already resolved")
 	ErrDisputeDuplicate = errors.New("payments: a dispute already exists for this reference")
+
+	// ErrChargeNotDisputable guards against reversing a charge that never
+	// succeeded — the merchant would be debited for money never credited.
+	ErrChargeNotDisputable = errors.New("payments: only a succeeded charge can be disputed")
+
+	// ErrDisputeMissingReference exists because the reference IS the dedupe
+	// key for processor-driven events; without one a redelivery cannot be
+	// recognised as a duplicate.
+	ErrDisputeMissingReference = errors.New("payments: a processor reference is required to open a dispute")
 )
 
 type Dispute struct {
@@ -96,6 +105,23 @@ func (s *Service) OpenDispute(ctx context.Context, in OpenDisputeInput) (*Disput
 			return fmt.Errorf("payments: lock charge for dispute: %w", err)
 		}
 
+		// Only a charge that actually succeeded can be disputed. Without this
+		// check a declined or unreconciled charge could be "reversed", debiting
+		// the merchant the full amount plus the dispute fee for money they were
+		// never credited — and both entries would balance, so the ledger
+		// invariant would not catch it. CreateRefund has always guarded this;
+		// this path did not, and read the status without using it.
+		if chargeStatus != StatusSucceeded {
+			return fmt.Errorf("%w: charge is %s", ErrChargeNotDisputable, chargeStatus)
+		}
+
+		// An empty reference would store as NULL, and Postgres treats every
+		// NULL as distinct — so ON CONFLICT below would never fire and a
+		// redelivered notification would reverse the funds a second time.
+		if in.ProcessorReference == "" {
+			return ErrDisputeMissingReference
+		}
+
 		amountCents := in.AmountCents
 		if amountCents == 0 {
 			amountCents = chargeAmount
@@ -117,7 +143,7 @@ func (s *Service) OpenDispute(ctx context.Context, in OpenDisputeInput) (*Disput
 			VALUES ($1,$2,$3,$4,$5,$6,'needs_response',$7,$8,$9)
 			ON CONFLICT (processor_reference) DO NOTHING`,
 			disputeID, in.ChargeID, merchantID, amountCents, currency,
-			in.Reason, dueBy, ledgerTxnID, nullIfEmpty(in.ProcessorReference),
+			in.Reason, dueBy, ledgerTxnID, in.ProcessorReference,
 		)
 		if err != nil {
 			return fmt.Errorf("payments: insert dispute: %w", err)

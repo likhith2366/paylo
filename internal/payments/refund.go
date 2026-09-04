@@ -180,10 +180,23 @@ func (s *Service) CreateRefund(ctx context.Context, in RefundInput, idemKey, req
 		return nil
 	})
 	if err != nil {
-		// Terminal so the client's retry replays this error rather than
-		// getting 409 while the claimed key sits in 'processing'.
-		if ferr := s.failRefund(ctx, refundID, idemRecordID, in, err); ferr != nil {
-			return nil, 0, ferr
+		// Only a genuine rejection of THIS request is terminal. A transient
+		// database error says nothing about whether the refund is valid, and
+		// burning it into a replayable failure would make a legitimate refund
+		// permanently impossible under this key (same bug as the vault path
+		// in CreateCharge).
+		switch {
+		case errors.Is(err, ErrChargeNotFound),
+			errors.Is(err, ErrChargeNotRefundable),
+			errors.Is(err, ErrRefundExceedsCharge):
+			if ferr := s.failRefund(ctx, refundID, idemRecordID, in, err); ferr != nil {
+				return nil, 0, ferr
+			}
+		default:
+			if rerr := s.releaseClaim(ctx, idemRecordID); rerr != nil {
+				slog.Error("payments: failed to release refund claim",
+					"refund_id", refundID, "error", rerr)
+			}
 		}
 		return nil, 0, err
 	}

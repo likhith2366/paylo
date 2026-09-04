@@ -76,6 +76,10 @@ type Transaction struct {
 	// Precomputed counters, read from Redis rather than derived here.
 	Velocity Velocity
 
+	// Behavioral biometrics from the checkout iframe. Aggregates only — see
+	// behavior.go for why nothing finer-grained crosses that boundary.
+	Behavior Behavior
+
 	// Merchant baselines, cached and refreshed periodically.
 	MerchantAvgAmountCents int64
 }
@@ -127,6 +131,8 @@ type Config struct {
 	// Score thresholds separating the three levels.
 	MediumThreshold float64 `yaml:"medium_threshold"`
 	HighThreshold   float64 `yaml:"high_threshold"`
+
+	Behavior BehaviorConfig `yaml:"behavior"`
 }
 
 // DefaultConfig returns thresholds tuned to be noticeably conservative.
@@ -152,6 +158,7 @@ func DefaultConfig() *Config {
 		},
 		MediumThreshold: 30,
 		HighThreshold:   70,
+		Behavior:        DefaultBehaviorConfig(),
 	}
 }
 
@@ -165,7 +172,7 @@ func NewEngine(config *Config) *Engine {
 	if config == nil {
 		config = DefaultConfig()
 	}
-	return &Engine{rules: defaultRules(), config: config}
+	return &Engine{rules: append(defaultRules(), behaviorRules()...), config: config}
 }
 
 // Evaluate scores a transaction.
