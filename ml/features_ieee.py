@@ -152,6 +152,32 @@ def build_features(df: pd.DataFrame, maps: dict | None = None) -> tuple[pd.DataF
     return features, maps
 
 
+# Columns PayFlow's Go client genuinely cannot supply.
+#
+# Not squeamishness — these are Vesta's own masked features. The competition
+# says only "C1-C14: counting, actual meaning is masked" and "V1-V339: Vesta
+# engineered rich features". We can build counters of the same SHAPE, but not
+# C8 specifically, and the model learns a weight for C8 specifically. Sending
+# our own numbers under those names is the same train/serve skew that took the
+# previous model from 0.97 offline to 0.29 in production, just subtler.
+#
+# The replacement is our own entity graph (§14.4) once there is traffic to
+# build it from — and ours will be better, because we will know what each
+# number means and be able to compute it at inference time.
+UNSERVABLE_PREFIXES = ("C", "V", "id_")
+
+
+def servable_feature_columns(df: pd.DataFrame) -> list[str]:
+    """Only what the charge path can actually send."""
+    import re
+    cols = []
+    for c in wide_feature_columns(df, include_v=False):
+        if re.fullmatch(r"C\d+", c) or re.fullmatch(r"V\d+", c) or c.startswith("id_"):
+            continue
+        cols.append(c)
+    return cols
+
+
 def wide_feature_columns(df: pd.DataFrame, include_v: bool) -> list[str]:
     """Every usable column, not just the hand-picked ones.
 
@@ -183,7 +209,8 @@ def wide_feature_columns(df: pd.DataFrame, include_v: bool) -> list[str]:
     return cols
 
 
-def build_wide(df: pd.DataFrame, maps: dict | None = None, include_v: bool = False):
+def build_wide(df: pd.DataFrame, maps: dict | None = None, include_v: bool = False,
+               servable_only: bool = False):
     """Wide feature matrix: engineered velocity features plus raw columns.
 
     Categoricals are label-encoded against maps fitted on train only; numerics
@@ -191,7 +218,9 @@ def build_wide(df: pd.DataFrame, maps: dict | None = None, include_v: bool = Fal
     """
     engineered, maps = build_features(df, maps)
 
-    raw = df[wide_feature_columns(df, include_v)].copy()
+    source_cols = (servable_feature_columns(df) if servable_only
+                   else wide_feature_columns(df, include_v))
+    raw = df[source_cols].copy()
     for col in raw.columns:
         if raw[col].dtype == object:
             key = f"_raw_{col}"

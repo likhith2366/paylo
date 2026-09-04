@@ -178,6 +178,8 @@ def main() -> int:
     parser.add_argument("--rounds", type=int, default=400)
     parser.add_argument("--wide", action="store_true",
                         help="use every usable column, not the hand-picked set")
+    parser.add_argument("--servable", action="store_true",
+                        help="only features the Go charge path can actually send")
     parser.add_argument("--include-v", action="store_true",
                         help="also use Vesta's opaque V1-V339 (benchmark only — NOT servable)")
     args = parser.parse_args()
@@ -190,7 +192,8 @@ def main() -> int:
         df = features_ieee.load(RAW_DIR / "ieee", wide=args.wide, include_v=args.include_v)
         label, time_col = "isFraud", "TransactionDT"
         if args.wide:
-            build = lambda d, m=None: features_ieee.build_wide(d, m, include_v=args.include_v)
+            build = lambda d, m=None: features_ieee.build_wide(
+                d, m, include_v=args.include_v, servable_only=args.servable)
             FEATURE_COLUMNS = None  # determined after the first build
         else:
             FEATURE_COLUMNS = features_ieee.FEATURE_COLUMNS
