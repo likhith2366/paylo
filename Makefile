@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help build test test-short test-race lint fmt up down reset ps logs psql seed ml-data ml-train k6
+.PHONY: help build test test-short test-race lint fmt up down reset ps logs psql seed dashboard dashboard-build ml-data ml-train k6
 
 # Testcontainers is chatty; strip the emoji progress lines so real output shows.
 FILTER := grep -v "🐳\|✅\|⏳\|🔔\|🚫"
@@ -53,6 +53,12 @@ psql: ## Open a psql shell
 
 seed: ## Create a test merchant and print its API key
 	go run ./scripts/seed
+
+dashboard: ## Run the merchant dashboard (needs `make up` and `make seed`)
+	cd web/dashboard && npm install && npm run dev
+
+dashboard-build: ## Type-check and build the dashboard
+	cd web/dashboard && npm install && npm run build
 
 ml-data: ## Download the Kaggle fraud datasets
 	python ml/download_data.py

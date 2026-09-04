@@ -45,8 +45,12 @@ make seed                  # prints an sk_test_... key, shown once
 make test                  # unit + integration, needs Docker
 ```
 
+```bash
+make dashboard             # merchant UI on :5173, paste the seeded key
+```
+
 Ports: payments `8080`, vault `8081`, fraud scoring `8000`, bank simulator
-`8090`, Mailhog UI `8025`.
+`8090`, Mailhog UI `8025`, dashboard `5173`.
 
 ```bash
 # The Payments API has no field that can carry a card number.
@@ -151,6 +155,9 @@ internal/
   reconcile         resolves ambiguity, re-derives invariants
   payouts           money out, T+2 hold, dispute reserves
   webhook           HMAC signing, at-least-once delivery
+web/
+  dashboard         merchant UI — React, TypeScript, TanStack Query
+  demo              a merchant checkout page, to show the iframe boundary
 ml/                 fraud model: data, features, training, serving
 migrations/         numbered SQL, applied in order
 ```
@@ -256,7 +263,6 @@ Per §0.1, and documented rather than silently missing:
 | Sanctions/AML screening, PCI QSA audit | Needs vendor contracts |
 | Tax calculation and remittance | Avalara-shaped, out of scope |
 | 3DS step-up (§16) | Designed; `requires_action` exists in the idempotency state machine, flow not built |
-| Merchant dashboard | Not built |
 
 ---
 

@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/likhith2366/paylo/internal/config"
+	"github.com/likhith2366/paylo/internal/dashboard"
 	"github.com/likhith2366/paylo/internal/db"
 	"github.com/likhith2366/paylo/internal/httpx"
 	"github.com/likhith2366/paylo/internal/payments"
@@ -28,6 +30,43 @@ func main() {
 		slog.Error("payments-api: fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+// dashboardCORS lets the dashboard SPA, served from its own origin, call this
+// API. Origins are an explicit allowlist — a wildcard would let any site on
+// the internet make authenticated requests on a merchant's behalf.
+func dashboardCORS(allowed []string) func(http.Handler) http.Handler {
+	set := make(map[string]bool, len(allowed))
+	for _, o := range allowed {
+		set[o] = true
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if origin := r.Header.Get("Origin"); origin != "" && set[origin] {
+				h := w.Header()
+				h.Set("Access-Control-Allow-Origin", origin)
+				h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key")
+				h.Add("Vary", "Origin")
+			}
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func splitOrigins(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' })
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func run() error {
@@ -78,11 +117,17 @@ func run() error {
 	)
 
 	handler := payments.NewHandler(payments.NewService(pool, bank, vaultClient, assessor))
+	dashboardHandler := dashboard.NewHandler(dashboard.NewService(pool))
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(httpx.Trace)
 	r.Use(httpx.LogRequests)
+	// Above the route table on purpose. chi answers OPTIONS on a GET-only
+	// route with 405 before any group middleware runs, so a preflight
+	// registered inside the authenticated group would never be reached and
+	// every browser request would fail.
+	r.Use(dashboardCORS(splitOrigins(cfg.DashboardOrigins)))
 
 	// Unauthenticated: liveness and readiness must answer even when the
 	// database is unhealthy, or Kubernetes cannot distinguish "starting up"
@@ -104,6 +149,7 @@ func run() error {
 	r.Group(func(r chi.Router) {
 		r.Use(httpx.AuthenticateAPIKey(pool))
 		handler.Routes(r)
+		dashboardHandler.Routes(r)
 	})
 
 	srv := &http.Server{

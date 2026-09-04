@@ -34,6 +34,9 @@ type Config struct {
 	// rules and blocklists if it is stable and unguessable (§14.5).
 	CardHashSalt string
 	LogLevel     string
+	// Origins allowed to call the API from a browser. An explicit list, never
+	// a wildcard — these are authenticated requests.
+	DashboardOrigins string
 }
 
 func Load() (Config, error) {
@@ -52,6 +55,7 @@ func Load() (Config, error) {
 		DBMaxConns:          int32(envInt("DB_MAX_CONNS", 25)),
 		CardHashSalt:        env("CARD_HASH_SALT", ""),
 		LogLevel:            env("LOG_LEVEL", "info"),
+		DashboardOrigins:    env("DASHBOARD_ORIGINS", "http://localhost:5173"),
 	}
 
 	// Refuse to start in production without a real salt rather than silently
