@@ -51,7 +51,8 @@ from sklearn.metrics import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from features import FEATURE_COLUMNS, build_features  # noqa: E402
+import features as sparkov_features  # noqa: E402
+import features_ieee  # noqa: E402
 
 ML_DIR = Path(__file__).resolve().parent.parent
 RAW_DIR = ML_DIR / "data" / "raw"
@@ -86,11 +87,12 @@ def load_sparkov(sample: int | None) -> pd.DataFrame:
     return df
 
 
-def chronological_split(df: pd.DataFrame, test_fraction: float = 0.2):
+def chronological_split(df: pd.DataFrame, test_fraction: float = 0.2,
+                        time_col: str = "trans_date_trans_time"):
     """Split on time: earliest rows train, latest rows test."""
-    df = df.sort_values("trans_date_trans_time").reset_index(drop=True)
+    df = df.sort_values(time_col).reset_index(drop=True)
     cutoff = int(len(df) * (1 - test_fraction))
-    boundary = df.loc[cutoff, "trans_date_trans_time"]
+    boundary = df.loc[cutoff, time_col]
     print(f"  split at {boundary}: {cutoff:,} train / {len(df) - cutoff:,} test")
     return df.iloc[:cutoff].copy(), df.iloc[cutoff:].copy()
 
@@ -171,21 +173,44 @@ def evaluate(y_true, y_prob, label: str) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--dataset", default="sparkov", choices=["sparkov"])
+    parser.add_argument("--dataset", default="ieee", choices=["ieee", "sparkov"])
     parser.add_argument("--sample", type=int, help="use only the N most recent rows")
     parser.add_argument("--rounds", type=int, default=400)
+    parser.add_argument("--wide", action="store_true",
+                        help="use every usable column, not the hand-picked set")
+    parser.add_argument("--include-v", action="store_true",
+                        help="also use Vesta's opaque V1-V339 (benchmark only — NOT servable)")
     args = parser.parse_args()
 
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     started = time.time()
 
-    print("Loading data")
-    df = load_sparkov(args.sample)
-    print(f"  {len(df):,} transactions, {int(df['is_fraud'].sum()):,} fraudulent "
-          f"({df['is_fraud'].mean() * 100:.3f}%)")
+    print(f"Loading {args.dataset}")
+    if args.dataset == "ieee":
+        df = features_ieee.load(RAW_DIR / "ieee", wide=args.wide, include_v=args.include_v)
+        label, time_col = "isFraud", "TransactionDT"
+        if args.wide:
+            build = lambda d, m=None: features_ieee.build_wide(d, m, include_v=args.include_v)
+            FEATURE_COLUMNS = None  # determined after the first build
+        else:
+            FEATURE_COLUMNS = features_ieee.FEATURE_COLUMNS
+            build = features_ieee.build_features
+    else:
+        df = load_sparkov(args.sample)
+        label, time_col = "is_fraud", "trans_date_trans_time"
+        FEATURE_COLUMNS = sparkov_features.FEATURE_COLUMNS
+        build = lambda d, m=None: sparkov_features.build_features(
+            d, category_map=(m or {}).get("category_map"),
+            state_map=(m or {}).get("state_map"))
+
+    if args.sample and args.sample < len(df):
+        df = df.sort_values(time_col).tail(args.sample).reset_index(drop=True)
+        print(f"  sampled the most recent {args.sample:,}")
+    print(f"  {len(df):,} transactions, {int(df[label].sum()):,} fraudulent "
+          f"({df[label].mean() * 100:.3f}%)")
 
     print("\nSplitting chronologically")
-    train_df, test_df = chronological_split(df)
+    train_df, test_df = chronological_split(df, time_col=time_col)
 
     # Carve a validation slice off the END of train for early stopping.
     #
@@ -203,22 +228,16 @@ def main() -> int:
     print("\nEngineering features")
     # Encodings are fitted on training data only and reused for the test set —
     # deriving them from the test set would leak information about it.
-    X_train, encodings = build_features(train_df)
-    y_train = train_df["is_fraud"].values
+    X_train, encodings = build(train_df)
+    y_train = train_df[label].values
+    if FEATURE_COLUMNS is None:
+        FEATURE_COLUMNS = list(X_train.columns)
 
-    X_val, _ = build_features(
-        val_df,
-        category_map=encodings["category_map"],
-        state_map=encodings["state_map"],
-    )
-    y_val = val_df["is_fraud"].values
+    X_val, _ = build(val_df, encodings)
+    y_val = val_df[label].values
 
-    X_test, _ = build_features(
-        test_df,
-        category_map=encodings["category_map"],
-        state_map=encodings["state_map"],
-    )
-    y_test = test_df["is_fraud"].values
+    X_test, _ = build(test_df, encodings)
+    y_test = test_df[label].values
     print(f"  {len(FEATURE_COLUMNS)} features")
 
     # Tell XGBoost the positive class is rare rather than rebalancing the data.
@@ -266,6 +285,7 @@ def main() -> int:
     # data assigns different integers to the same category, which silently
     # corrupts every prediction rather than failing loudly.
     (ARTIFACT_DIR / "encodings.json").write_text(json.dumps(encodings, indent=2))
+    (ARTIFACT_DIR / "dataset.txt").write_text(args.dataset)
 
     metrics = {
         "dataset": args.dataset,
