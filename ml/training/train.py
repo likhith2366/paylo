@@ -187,11 +187,31 @@ def main() -> int:
     print("\nSplitting chronologically")
     train_df, test_df = chronological_split(df)
 
+    # Carve a validation slice off the END of train for early stopping.
+    #
+    # Previously early stopping evaluated on the TEST set, which leaks model
+    # selection into the number being reported. It happened to cost nothing
+    # here — best_iteration was 399 of 400, so it never actually fired — but it
+    # is a latent bug that would silently corrupt the headline the moment the
+    # model did stop early. Validation comes from the tail of train so it stays
+    # chronologically before test.
+    val_cut = int(len(train_df) * 0.9)
+    val_df = train_df.iloc[val_cut:].copy()
+    train_df = train_df.iloc[:val_cut].copy()
+    print(f"  held out {len(val_df):,} rows from the end of train for early stopping")
+
     print("\nEngineering features")
     # Encodings are fitted on training data only and reused for the test set —
     # deriving them from the test set would leak information about it.
     X_train, encodings = build_features(train_df)
     y_train = train_df["is_fraud"].values
+
+    X_val, _ = build_features(
+        val_df,
+        category_map=encodings["category_map"],
+        state_map=encodings["state_map"],
+    )
+    y_val = val_df["is_fraud"].values
 
     X_test, _ = build_features(
         test_df,
@@ -222,7 +242,8 @@ def main() -> int:
         n_jobs=-1,
         random_state=42,
     )
-    model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+    # eval_set is the validation slice, never test.
+    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
     print(f"  stopped at round {model.best_iteration} of {args.rounds}")
 
     print("\nEvaluating")
@@ -251,6 +272,7 @@ def main() -> int:
         "trained_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "rows_total": int(len(df)),
         "rows_train": int(len(train_df)),
+        "rows_validation": int(len(val_df)),
         "rows_test": int(len(test_df)),
         "features": FEATURE_COLUMNS,
         "best_iteration": int(model.best_iteration),

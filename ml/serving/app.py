@@ -26,7 +26,7 @@ import json
 import logging
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -38,7 +38,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("fraud-service")
 
 ARTIFACT_DIR = Path(__file__).resolve().parent.parent / "artifacts"
-EARTH_RADIUS_KM = 6371.0
 
 # Must match ml/features.py exactly. A mismatch here does not raise — it
 # silently feeds the model the wrong column in each position, which produces
@@ -46,10 +45,9 @@ EARTH_RADIUS_KM = 6371.0
 FEATURE_COLUMNS = [
     "amt", "amt_log", "amt_zscore_card",
     "hour", "day_of_week", "is_night", "is_weekend",
-    "age_years", "distance_km", "city_pop_log",
     "txn_count_1h", "txn_count_24h", "txn_count_7d", "amt_sum_24h",
     "seconds_since_last_txn",
-    "category_encoded", "state_encoded", "gender_encoded",
+    "category_encoded", "state_encoded",
 ]
 
 # Thresholds from the test-set operating points in metrics.json. Chosen for
@@ -75,14 +73,7 @@ class ScoreRequest(BaseModel):
     card_fingerprint: str | None = None
     category: str | None = None
     state: str | None = None
-    gender: str | None = None
 
-    cardholder_dob: str | None = None
-    cardholder_lat: float | None = None
-    cardholder_lon: float | None = None
-    merchant_lat: float | None = None
-    merchant_lon: float | None = None
-    city_population: int | None = None
 
     # Velocity counters, read from Redis by the caller — never recomputed here.
     txn_count_1h: float | None = None
@@ -142,13 +133,6 @@ class ModelBundle:
         )
 
 
-def haversine_km(lat1, lon1, lat2, lon2) -> float:
-    lat1, lon1, lat2, lon2 = map(math.radians, (lat1, lon1, lat2, lon2))
-    dlat, dlon = lat2 - lat1, lon2 - lon1
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
-
-
 def build_vector(req: ScoreRequest, bundle: ModelBundle) -> tuple[np.ndarray, bool]:
     """Turn a request into the model's feature vector.
 
@@ -159,31 +143,18 @@ def build_vector(req: ScoreRequest, bundle: ModelBundle) -> tuple[np.ndarray, bo
     """
     degraded = False
 
-    ts = datetime.now(timezone.utc)
+    # Naive LOCAL time, deliberately. Training used the cardholder's wall clock,
+    # and hour-of-day only means anything relative to their day — 3am matters
+    # because they are asleep. An earlier version of the caller sent UTC, which
+    # shifted hour by 4-8 hours and cost 0.24 PR-AUC on its own.
+    ts = datetime.now()
     if req.timestamp:
         try:
-            ts = datetime.fromisoformat(req.timestamp.replace("Z", "+00:00"))
+            ts = datetime.fromisoformat(req.timestamp.replace("Z", "")).replace(tzinfo=None)
         except ValueError:
             degraded = True
 
     amt = req.amount_cents / 100.0
-
-    # Distance between cardholder and merchant.
-    if None not in (req.cardholder_lat, req.cardholder_lon, req.merchant_lat, req.merchant_lon):
-        distance = haversine_km(req.cardholder_lat, req.cardholder_lon,
-                                req.merchant_lat, req.merchant_lon)
-    else:
-        distance = np.nan
-        degraded = True
-
-    if req.cardholder_dob:
-        try:
-            dob = datetime.fromisoformat(req.cardholder_dob)
-            age = (ts.replace(tzinfo=None) - dob).days / 365.25
-        except ValueError:
-            age, degraded = np.nan, True
-    else:
-        age, degraded = np.nan, True
 
     # How unusual is this amount for this card, given its history.
     if req.card_avg_amount is not None and req.card_std_amount:
@@ -199,6 +170,9 @@ def build_vector(req: ScoreRequest, bundle: ModelBundle) -> tuple[np.ndarray, bo
     if req.txn_count_1h is None:
         degraded = True
 
+    # Order MUST match FEATURE_COLUMNS exactly. A mismatch does not raise — it
+    # feeds the model the wrong column in each position and produces confident
+    # nonsense. The startup check against metrics.json is what catches it.
     vector = [
         amt,
         math.log1p(amt),
@@ -207,9 +181,6 @@ def build_vector(req: ScoreRequest, bundle: ModelBundle) -> tuple[np.ndarray, bo
         ts.weekday(),
         1 if (ts.hour >= 22 or ts.hour <= 5) else 0,
         1 if ts.weekday() >= 5 else 0,
-        age,
-        distance,
-        math.log1p(req.city_population) if req.city_population else np.nan,
         _or_nan(req.txn_count_1h),
         _or_nan(req.txn_count_24h),
         _or_nan(req.txn_count_7d),
@@ -217,7 +188,6 @@ def build_vector(req: ScoreRequest, bundle: ModelBundle) -> tuple[np.ndarray, bo
         _or_nan(req.seconds_since_last_txn),
         category,
         state,
-        1 if (req.gender or "").upper() == "M" else 0,
     ]
     return np.array([vector], dtype=np.float32), degraded
 

@@ -57,10 +57,13 @@ type ModelRequest struct {
 	State           string `json:"state,omitempty"`
 	CardFingerprint string `json:"card_fingerprint,omitempty"`
 
-	TxnCount1h  *float64 `json:"txn_count_1h,omitempty"`
-	TxnCount24h *float64 `json:"txn_count_24h,omitempty"`
-	TxnCount7d  *float64 `json:"txn_count_7d,omitempty"`
-	AmtSum24h   *float64 `json:"amt_sum_24h,omitempty"`
+	TxnCount1h          *float64 `json:"txn_count_1h,omitempty"`
+	TxnCount24h         *float64 `json:"txn_count_24h,omitempty"`
+	TxnCount7d          *float64 `json:"txn_count_7d,omitempty"`
+	AmtSum24h           *float64 `json:"amt_sum_24h,omitempty"`
+	SecondsSinceLastTxn *float64 `json:"seconds_since_last_txn,omitempty"`
+	CardAvgAmount       *float64 `json:"card_avg_amount,omitempty"`
+	CardStdAmount       *float64 `json:"card_std_amount,omitempty"`
 }
 
 type ModelResponse struct {

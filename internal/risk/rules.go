@@ -73,6 +73,18 @@ type Transaction struct {
 	DeviceID        string
 	Timestamp       time.Time
 
+	// Merchant and cardholder attributes the model needs. MerchantCategory is
+	// the second most important feature in the model; it was previously never
+	// sent.
+	MerchantCategory string
+	BillingState     string
+
+	// Per-card amount baseline, for the amount z-score feature. Negative means
+	// unknown — a first charge on a card has no baseline, and inventing one
+	// would flag it.
+	CardAvgAmountCents int64
+	CardStdAmountCents int64
+
 	// Precomputed counters, read from Redis rather than derived here.
 	Velocity Velocity
 
@@ -91,6 +103,10 @@ type Velocity struct {
 	CardDeclinesLastHour  int
 	IPChargesLastHour     int
 	DeviceChargesLastHour int
+	CardChargesLastWeek   int
+	// Negative means unknown, distinct from a genuine zero.
+	CardAmountSumLastDay   int64
+	SecondsSinceLastCharge int64
 	// Distinct cards seen on one device — the strongest single signal of
 	// card testing, where a fraudster cycles stolen numbers through one browser.
 	DeviceDistinctCards int

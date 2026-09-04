@@ -95,13 +95,31 @@ func (s *Service) Assess(ctx context.Context, txn Transaction) Decision {
 		return decision
 	}
 
+	// Every feature the model was trained on, or the model scores on defaults
+	// and produces confident nonsense. An audit measured the cost of getting
+	// this wrong: sending six of the fourteen dropped test PR-AUC from 0.97 to
+	// 0.29, because category alone is the second most important feature and
+	// arrived as -1 on every charge.
+	//
+	// The timestamp is deliberately NOT converted to UTC. Training used local
+	// wall-clock time, and hour-of-day is only meaningful relative to the
+	// cardholder's day — 3am matters because they are asleep, not because of
+	// an offset from Greenwich. Sending UTC shifted hour by 4-8 hours and cost
+	// a further 0.24 PR-AUC on its own.
 	modelResp, err := s.model.Score(ctx, ModelRequest{
-		AmountCents:     txn.AmountCents,
-		Currency:        txn.Currency,
-		Timestamp:       txn.Timestamp.UTC().Format(time.RFC3339),
-		CardFingerprint: txn.CardFingerprint,
-		TxnCount1h:      floatPtr(txn.Velocity.CardChargesLastHour),
-		TxnCount24h:     floatPtr(txn.Velocity.CardChargesLastDay),
+		AmountCents:         txn.AmountCents,
+		Currency:            txn.Currency,
+		Timestamp:           txn.Timestamp.Format("2006-01-02T15:04:05"),
+		CardFingerprint:     txn.CardFingerprint,
+		Category:            txn.MerchantCategory,
+		State:               txn.BillingState,
+		TxnCount1h:          floatPtr(txn.Velocity.CardChargesLastHour),
+		TxnCount24h:         floatPtr(txn.Velocity.CardChargesLastDay),
+		TxnCount7d:          floatPtr(txn.Velocity.CardChargesLastWeek),
+		AmtSum24h:           optFloat(txn.Velocity.CardAmountSumLastDay),
+		SecondsSinceLastTxn: optFloat(txn.Velocity.SecondsSinceLastCharge),
+		CardAvgAmount:       optFloat(txn.CardAvgAmountCents, 0.01),
+		CardStdAmount:       optFloat(txn.CardStdAmountCents, 0.01),
 	})
 
 	if err != nil || modelResp == nil {
@@ -162,5 +180,22 @@ func msSince(t time.Time) float64 {
 
 func floatPtr(n int) *float64 {
 	f := float64(n)
+	return &f
+}
+
+// optFloat returns nil for a missing value rather than 0.
+//
+// The distinction is load-bearing: 0 asserts "this card has spent nothing in
+// 24 hours", which is a claim, while nil says "we do not know" and lets
+// XGBoost use the default branch it learned. Sending 0 for unknown is how a
+// model gets fed a confident lie.
+func optFloat(n int64, scale ...float64) *float64 {
+	if n < 0 {
+		return nil
+	}
+	f := float64(n)
+	if len(scale) > 0 {
+		f *= scale[0]
+	}
 	return &f
 }

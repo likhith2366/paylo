@@ -16,11 +16,35 @@ Feature groups, matching the design doc's list:
                 these are Redis counters (`charges_last_1h:{fingerprint}`)
                 incremented on each charge with a TTL, never recomputed by
                 scanning history
-  geo           haversine distance between the cardholder's registered address
-                and the merchant's location. A charge 3000km from home is the
-                single strongest simple signal in this dataset
-  card          age of the cardholder, derived from date of birth
-  categorical   merchant category, state, gender — target-free label encoding
+  geo           REMOVED. An earlier version claimed distance from home was
+                "the single strongest simple signal in this dataset". That was
+                false and worth recording: Sparkov places every merchant a
+                small random offset from the cardholder, so fraud distance
+                (median 78.1km, max 144.5km) is indistinguishable from legit
+                (median 78.2km, max 152.1km) and no row in either class exceeds
+                1000km. Single-feature AUC 0.504 — a coin flip. In the real
+                world geo distance matters; it cannot be learned from this data,
+                so carrying it only added a feature production must supply for
+                no benefit.
+  categorical   merchant category and state — target-free label encoding
+
+FEATURES DELIBERATELY EXCLUDED, and why:
+
+  age_years     Needs the cardholder's date of birth. No checkout collects it,
+                so it can never be supplied at inference time.
+  city_pop_log  Needs the population of the cardholder's home city. Unknown to
+                a payment gateway.
+  gender        A protected attribute. Scoring fraud risk on it invites a
+                discrimination claim regardless of predictive value. The
+                serving code additionally hardcoded it to 0 on every request,
+                silently asserting one value for every cardholder.
+  distance_km   Unlearnable from this dataset (see above).
+
+That list is not squeamishness. Training on a feature production cannot supply
+is worse than not having it: the model learns to lean on the feature, then
+receives a default at inference and scores confidently on a value that means
+nothing. Measured cost of exactly that mistake here — the model scored 0.9735
+offline and 0.2867 through the vector the Go client actually sends.
 
 Training must not leak the future into the past: every rolling window below is
 computed with `closed="left"`, so a transaction's own value never contributes
@@ -32,18 +56,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-EARTH_RADIUS_KM = 6371.0
-
-
-def haversine_km(lat1, lon1, lat2, lon2):
-    """Great-circle distance in kilometres, vectorized over numpy arrays."""
-    lat1, lon1, lat2, lon2 = map(np.radians, (lat1, lon1, lat2, lon2))
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
-    return 2 * EARTH_RADIUS_KM * np.arcsin(np.sqrt(a))
-
-
 # Columns fed to the model. Kept explicit so training and serving cannot drift
 # apart — a mismatch here is silent and produces garbage scores in production.
 FEATURE_COLUMNS = [
@@ -54,9 +66,6 @@ FEATURE_COLUMNS = [
     "day_of_week",
     "is_night",
     "is_weekend",
-    "age_years",
-    "distance_km",
-    "city_pop_log",
     "txn_count_1h",
     "txn_count_24h",
     "txn_count_7d",
@@ -64,7 +73,6 @@ FEATURE_COLUMNS = [
     "seconds_since_last_txn",
     "category_encoded",
     "state_encoded",
-    "gender_encoded",
 ]
 
 
@@ -77,7 +85,6 @@ def build_features(df: pd.DataFrame, category_map=None, state_map=None) -> tuple
     """
     df = df.copy()
     df["trans_date_trans_time"] = pd.to_datetime(df["trans_date_trans_time"])
-    df["dob"] = pd.to_datetime(df["dob"])
 
     # Remember where every row started.
     #
@@ -106,16 +113,6 @@ def build_features(df: pd.DataFrame, category_map=None, state_map=None) -> tuple
     df["is_night"] = ((df["hour"] >= 22) | (df["hour"] <= 5)).astype(int)
     df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
 
-    # --- cardholder ---------------------------------------------------------
-    df["age_years"] = ((ts - df["dob"]).dt.days / 365.25).astype(float)
-
-    # --- geo ----------------------------------------------------------------
-    df["distance_km"] = haversine_km(
-        df["lat"].values, df["long"].values,
-        df["merch_lat"].values, df["merch_long"].values,
-    )
-    df["city_pop_log"] = np.log1p(df["city_pop"])
-
     # --- velocity -----------------------------------------------------------
     # closed="left" excludes the current row from its own window. Without it
     # every transaction would count itself, and worse, the model would learn
@@ -143,6 +140,14 @@ def build_features(df: pd.DataFrame, category_map=None, state_map=None) -> tuple
             # lands on exactly the rows the values were computed from.
             df.loc[group.index, column] = values.to_numpy()
 
+    # A count of zero is a FACT — "no charges on this card in the last hour" —
+    # not missing data. pandas returns NaN for an empty window, which conflates
+    # the two, and 83% of rows were affected. It also created a train/serve
+    # mismatch: Redis returns 0 for a key that does not exist, so production
+    # sent 0 where training had seen NaN.
+    for column in windows:
+        df[column] = df[column].fillna(0.0)
+
     # A burst of charges seconds apart on one card is the classic card-testing
     # pattern — a fraudster verifying which stolen numbers still work.
     df["seconds_since_last_txn"] = (
@@ -166,7 +171,6 @@ def build_features(df: pd.DataFrame, category_map=None, state_map=None) -> tuple
     # a new merchant category must not take down the risk engine.
     df["category_encoded"] = df["category"].map(category_map).fillna(-1).astype(int)
     df["state_encoded"] = df["state"].map(state_map).fillna(-1).astype(int)
-    df["gender_encoded"] = (df["gender"] == "M").astype(int)
 
     # A first-ever transaction on a card genuinely has no prior history. NaN is
     # the honest encoding, and XGBoost handles it natively by learning a default
