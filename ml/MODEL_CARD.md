@@ -2,7 +2,7 @@
 
 XGBoost classifier scoring card charges in the synchronous risk path (§14.3).
 
-**Trained on IEEE-CIS — real transactions. Test PR-AUC 0.3508.**
+**Trained on IEEE-CIS — real transactions. Test PR-AUC 0.1880, deployed.**
 
 ## The number
 
@@ -13,11 +13,25 @@ gap between them is the point.
 |---|---|---|---|
 | Guessing the base rate | — | 0.0344 | — |
 | Hand-picked | 18 | 0.1772 | yes |
-| **Servable** | **58** | **0.3508** | **yes — this is the real number** |
+| **Deployed** | **21** | **0.1880** | **yes — Go sends every one** |
+| "Servable" (first attempt) | 58 | 0.3508 | **no** — see below |
 | Wide | 110 | 0.4898 | no |
 | Wide + Vesta `V1`-`V339` | 449 | 0.4974 | no |
 
-**Why 0.4898 is not the number.** It leans on `C1`-`C14` and `id_01`-`id_38`,
+**The 58-feature model was a false floor.** It filtered out the obviously
+proprietary columns (`C*`, `V*`, `id_*`) but kept ones that merely look
+generic. `card1` groups a card's history perfectly well for training, but
+PayFlow cannot produce its value for a new charge — nobody outside Vesta knows
+what it encodes. Same for `card2`, `card3`, `card5`, `dist1`, `dist2`, and the
+`D*` timedeltas whose measured entity is masked. `M1`-`M9` are conceptually
+reproducible but need billing name and address, which checkout does not
+collect.
+
+Removing them costs 0.3508 -> 0.1880. That drop is the honest price of the
+constraint, and it is worth paying: the alternative is a third repetition of
+the train/serve gap this codebase has already paid for twice.
+
+**Why the larger numbers are not the number.** It leans on `C1`-`C14` and `id_01`-`id_38`,
 which carry 55% of that model's importance and which PayFlow cannot reproduce.
 Vesta masked them deliberately; the competition says only "C1-C14: counting,
 such as how many addresses are found to be associated with the payment card.
@@ -42,6 +56,11 @@ this dataset is GBT, not a net.)
 | 50% | 0.267 | 2,032 | 2,032 | 488 |
 | 70% | 0.159 | 2,845 | 1,219 | 1,319 |
 | 90% | 0.080 | 3,658 | 406 | 3,711 |
+
+The 21 features are: amount (3), time (4), velocity (5), card brand and funding
+type, purchaser and recipient email domain, merchant category, billing region
+and country, device type and family. Go sends all 21; the service refuses to
+start if its column list disagrees with the trained model.
 
 50% recall is the usable point. 90% is not — declining 1 in 3 legitimate
 customers to catch the last 10% of fraud is the wrong trade for almost any
@@ -130,11 +149,12 @@ breaker.
 
 ## Known limitations
 
-- **The Go client does not yet send the full 58-feature vector.** It sends the
-  narrow engineered set, so production currently behaves closer to the 0.1772
-  model. Wiring the remaining columns (`D1`-`D15`, `card1`-`card6`, `addr`,
-  `dist`, email domains, device) is the next fix. `M1`-`M9` additionally need
-  billing name and address, which checkout does not collect today.
+- **Accuracy is low, and known to be.** PR-AUC 0.1880 is 5.5x better than
+  guessing but catches only half the fraud at 27% precision. It is a starting
+  point, not a finished system. The route to better is the entity graph above,
+  not more columns from a public dataset.
+- Checkout does not collect billing name or address, which blocks the `M*`
+  match-flag family.
 - No adversarial adaptation — a static 2017-2018 snapshot.
 - `card1` is a proxy for card identity; there is no true card id column.
 - `TransactionDT` is a seconds offset from an undisclosed reference (taken as

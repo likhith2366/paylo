@@ -78,6 +78,10 @@ type Transaction struct {
 	// sent.
 	MerchantCategory string
 	BillingState     string
+	RecipientEmail   string
+	CardType         string // debit / credit, derived from the BIN
+	DeviceType       string // desktop / mobile
+	DeviceInfo       string // coarse user-agent family
 
 	// Per-card amount baseline, for the amount z-score feature. Negative means
 	// unknown — a first charge on a card has no baseline, and inventing one

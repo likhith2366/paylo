@@ -47,7 +47,9 @@ FEATURE_COLUMNS = [
     "hour", "day_of_week", "is_night", "is_weekend",
     "txn_count_1h", "txn_count_24h", "txn_count_7d", "amt_sum_24h",
     "seconds_since_last_txn",
-    "category_encoded", "state_encoded",
+    "card_brand_encoded", "card_type_encoded", "email_domain_encoded",
+    "product_encoded", "addr_encoded", "device_type_encoded",
+    "addr2", "R_emaildomain", "DeviceInfo",
 ]
 
 # Thresholds from the test-set operating points in metrics.json. Chosen for
@@ -71,8 +73,19 @@ class ScoreRequest(BaseModel):
     timestamp: str | None = None
 
     card_fingerprint: str | None = None
-    category: str | None = None
-    state: str | None = None
+
+    # Every one of these is something PayFlow holds at charge time. The model
+    # was trained on exactly this set — nothing it learned on is unavailable
+    # here, which is the property the earlier models did not have.
+    card_brand: str | None = None      # visa / mastercard / amex / discover
+    card_type: str | None = None       # debit / credit, from the BIN
+    email_domain: str | None = None    # purchaser
+    recipient_email_domain: str | None = None
+    product: str | None = None         # merchant category
+    billing_region: str | None = None  # addr1 equivalent
+    billing_country: str | None = None # addr2 equivalent
+    device_type: str | None = None     # desktop / mobile
+    device_info: str | None = None     # coarse UA family
 
 
     # Velocity counters, read from Redis by the caller — never recomputed here.
@@ -108,9 +121,11 @@ class ModelBundle:
         self.booster = xgb.XGBClassifier()
         self.booster.load_model(model_path)
 
-        encodings = json.loads((artifact_dir / "encodings.json").read_text())
-        self.category_map: dict[str, int] = encodings["category_map"]
-        self.state_map: dict[str, int] = encodings["state_map"]
+        # One dict of every label encoding, keyed by feature name. Must ship
+        # with the model: regenerating from different data assigns different
+        # integers to the same value and silently corrupts every prediction.
+        self.maps: dict[str, dict] = json.loads(
+            (artifact_dir / "encodings.json").read_text())
 
         metrics_path = artifact_dir / "metrics.json"
         self.metrics = json.loads(metrics_path.read_text()) if metrics_path.exists() else {}
@@ -162,10 +177,21 @@ def build_vector(req: ScoreRequest, bundle: ModelBundle) -> tuple[np.ndarray, bo
     else:
         amt_z = np.nan
 
-    # Unseen categories map to -1, matching training. A new merchant category
-    # must not take down the risk engine.
-    category = bundle.category_map.get((req.category or "").lower(), -1)
-    state = bundle.state_map.get((req.state or "").upper(), -1)
+    # Unseen values map to -1, matching training. A new merchant category or an
+    # unfamiliar device string must not take down the risk engine.
+    def enc(name: str, value: str | None) -> int:
+        return bundle.maps.get(name, {}).get(str(value), -1)
+
+    card_brand = enc("card_brand_encoded", req.card_brand)
+    card_type = enc("card_type_encoded", req.card_type)
+    email_domain = enc("email_domain_encoded", req.email_domain)
+    product = enc("product_encoded", req.product)
+    billing_region = enc("addr_encoded", req.billing_region)
+    device_type = enc("device_type_encoded", req.device_type)
+    recipient_email = enc("_raw_R_emaildomain", req.recipient_email_domain)
+    device_info = enc("_raw_DeviceInfo", req.device_info)
+    billing_country = _or_nan(
+        float(req.billing_country) if (req.billing_country or "").isdigit() else None)
 
     if req.txn_count_1h is None:
         degraded = True
@@ -186,8 +212,15 @@ def build_vector(req: ScoreRequest, bundle: ModelBundle) -> tuple[np.ndarray, bo
         _or_nan(req.txn_count_7d),
         _or_nan(req.amt_sum_24h),
         _or_nan(req.seconds_since_last_txn),
-        category,
-        state,
+        card_brand,
+        card_type,
+        email_domain,
+        product,
+        billing_region,
+        device_type,
+        billing_country,
+        recipient_email,
+        device_info,
     ]
     return np.array([vector], dtype=np.float32), degraded
 

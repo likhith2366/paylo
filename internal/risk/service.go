@@ -3,6 +3,7 @@ package risk
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -107,19 +108,26 @@ func (s *Service) Assess(ctx context.Context, txn Transaction) Decision {
 	// an offset from Greenwich. Sending UTC shifted hour by 4-8 hours and cost
 	// a further 0.24 PR-AUC on its own.
 	modelResp, err := s.model.Score(ctx, ModelRequest{
-		AmountCents:         txn.AmountCents,
-		Currency:            txn.Currency,
-		Timestamp:           txn.Timestamp.Format("2006-01-02T15:04:05"),
-		CardFingerprint:     txn.CardFingerprint,
-		Category:            txn.MerchantCategory,
-		State:               txn.BillingState,
-		TxnCount1h:          floatPtr(txn.Velocity.CardChargesLastHour),
-		TxnCount24h:         floatPtr(txn.Velocity.CardChargesLastDay),
-		TxnCount7d:          floatPtr(txn.Velocity.CardChargesLastWeek),
-		AmtSum24h:           optFloat(txn.Velocity.CardAmountSumLastDay),
-		SecondsSinceLastTxn: optFloat(txn.Velocity.SecondsSinceLastCharge),
-		CardAvgAmount:       optFloat(txn.CardAvgAmountCents, 0.01),
-		CardStdAmount:       optFloat(txn.CardStdAmountCents, 0.01),
+		AmountCents:          txn.AmountCents,
+		Currency:             txn.Currency,
+		Timestamp:            txn.Timestamp.Format("2006-01-02T15:04:05"),
+		CardFingerprint:      txn.CardFingerprint,
+		CardBrand:            txn.CardBrand,
+		CardType:             txn.CardType,
+		EmailDomain:          emailDomain(txn.Email),
+		RecipientEmailDomain: emailDomain(txn.RecipientEmail),
+		Product:              txn.MerchantCategory,
+		BillingRegion:        txn.BillingState,
+		BillingCountry:       txn.BillingCountry,
+		DeviceType:           txn.DeviceType,
+		DeviceInfo:           txn.DeviceInfo,
+		TxnCount1h:           floatPtr(txn.Velocity.CardChargesLastHour),
+		TxnCount24h:          floatPtr(txn.Velocity.CardChargesLastDay),
+		TxnCount7d:           floatPtr(txn.Velocity.CardChargesLastWeek),
+		AmtSum24h:            optFloat(txn.Velocity.CardAmountSumLastDay),
+		SecondsSinceLastTxn:  optFloat(txn.Velocity.SecondsSinceLastCharge),
+		CardAvgAmount:        optFloat(txn.CardAvgAmountCents, 0.01),
+		CardStdAmount:        optFloat(txn.CardStdAmountCents, 0.01),
 	})
 
 	if err != nil || modelResp == nil {
@@ -172,6 +180,16 @@ func (s *Service) RecordOutcome(ctx context.Context, txn Transaction, declined b
 		// money, so it is logged and swallowed rather than failing the charge.
 		slog.Warn("risk: failed to record velocity", "error", err)
 	}
+}
+
+// emailDomain extracts the domain, which is what the model was trained on.
+// The local part is both useless as a signal and personal data we have no
+// reason to send to a scoring service.
+func emailDomain(email string) string {
+	if _, domain, found := strings.Cut(strings.ToLower(email), "@"); found {
+		return domain
+	}
+	return ""
 }
 
 func msSince(t time.Time) float64 {

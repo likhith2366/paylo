@@ -50,12 +50,19 @@ func NewClient(baseURL string, timeout time.Duration) *Client {
 
 // ModelRequest is the scoring service's input.
 type ModelRequest struct {
-	AmountCents     int64  `json:"amount_cents"`
-	Currency        string `json:"currency"`
-	Timestamp       string `json:"timestamp,omitempty"`
-	Category        string `json:"category,omitempty"`
-	State           string `json:"state,omitempty"`
-	CardFingerprint string `json:"card_fingerprint,omitempty"`
+	AmountCents          int64  `json:"amount_cents"`
+	Currency             string `json:"currency"`
+	Timestamp            string `json:"timestamp,omitempty"`
+	CardBrand            string `json:"card_brand,omitempty"`
+	CardType             string `json:"card_type,omitempty"`
+	EmailDomain          string `json:"email_domain,omitempty"`
+	RecipientEmailDomain string `json:"recipient_email_domain,omitempty"`
+	Product              string `json:"product,omitempty"`
+	BillingRegion        string `json:"billing_region,omitempty"`
+	BillingCountry       string `json:"billing_country,omitempty"`
+	DeviceType           string `json:"device_type,omitempty"`
+	DeviceInfo           string `json:"device_info,omitempty"`
+	CardFingerprint      string `json:"card_fingerprint,omitempty"`
 
 	TxnCount1h          *float64 `json:"txn_count_1h,omitempty"`
 	TxnCount24h         *float64 `json:"txn_count_24h,omitempty"`

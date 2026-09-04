@@ -167,15 +167,34 @@ def build_features(df: pd.DataFrame, maps: dict | None = None) -> tuple[pd.DataF
 UNSERVABLE_PREFIXES = ("C", "V", "id_")
 
 
+# Columns whose MEANING we know and whose value PayFlow can compute from a
+# live charge. This is a stricter test than "not obviously proprietary".
+#
+# Excluded even though they survive the C/V/id filter:
+#   card1,2,3,5  hashed Vesta card attributes. card1 works as a card-identity
+#                proxy for grouping history, but we cannot produce its value
+#                for a new charge — we do not know what it encodes.
+#   dist1,2      masked distances, undocumented.
+#   D1-D15       "timedelta", but which entity each measures is masked.
+#   M1-M9        match flags. Conceptually reproducible — does the name on the
+#                card match billing — but checkout does not collect billing
+#                name or address today.
+KNOWN_SEMANTICS = {
+    "TransactionAmt",   # amount
+    "ProductCD",        # merchant category
+    "card4",            # brand: visa / mastercard / amex / discover
+    "card6",            # funding: debit / credit
+    "P_emaildomain",    # purchaser email domain
+    "R_emaildomain",    # recipient email domain
+    "addr1", "addr2",   # billing region
+    "DeviceType", "DeviceInfo",
+}
+
+
 def servable_feature_columns(df: pd.DataFrame) -> list[str]:
-    """Only what the charge path can actually send."""
-    import re
-    cols = []
-    for c in wide_feature_columns(df, include_v=False):
-        if re.fullmatch(r"C\d+", c) or re.fullmatch(r"V\d+", c) or c.startswith("id_"):
-            continue
-        cols.append(c)
-    return cols
+    """Only what the charge path can actually produce for a new charge."""
+    return [c for c in wide_feature_columns(df, include_v=False)
+            if c in KNOWN_SEMANTICS]
 
 
 def wide_feature_columns(df: pd.DataFrame, include_v: bool) -> list[str]:
@@ -232,6 +251,13 @@ def build_wide(df: pd.DataFrame, maps: dict | None = None, include_v: bool = Fal
     raw.index = engineered.index
     # Engineered columns win on name collision — ours are leak-checked.
     raw = raw.drop(columns=[c for c in raw.columns if c in engineered.columns], errors="ignore")
+    # Also drop raw columns already label-encoded into an engineered feature.
+    # Keeping both ships the same signal twice under two names, which does not
+    # hurt the model but makes the serving contract ambiguous — and an
+    # ambiguous contract is how the train/serve mismatch keeps happening.
+    raw = raw.drop(columns=[c for c in _SOURCE.values() if c in raw.columns] +
+                           [c for c in ("TransactionAmt",) if c in raw.columns],
+                   errors="ignore")
     return pd.concat([engineered, raw], axis=1), maps
 
 
