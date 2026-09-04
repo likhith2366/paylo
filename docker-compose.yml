@@ -189,6 +189,38 @@ services:
       timeout: 3s
       retries: 5
 
+  # Outbox poller + webhook delivery (§7, §22.1).
+  webhook-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: webhook-worker
+    environment:
+      DATABASE_URL: postgres://paylo:paylo@postgres:5432/paylo?sslmode=disable
+      WEBHOOK_CONCURRENCY: "10"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Periodic jobs (§9). Reconciliation resolves ambiguous charges against the
+  # processor's log and re-derives the ledger invariants.
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: scheduler
+    environment:
+      DATABASE_URL: postgres://paylo:paylo@postgres:5432/paylo?sslmode=disable
+      BANK_SIMULATOR_URL: http://bank-simulator:8090
+      RECONCILE_INTERVAL: "1h"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      bank-simulator:
+        condition: service_started
+
 volumes:
   pgdata:
   redisdata:
