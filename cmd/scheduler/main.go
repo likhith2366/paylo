@@ -20,6 +20,7 @@ import (
 	"github.com/likhith2366/paylo/internal/config"
 	"github.com/likhith2366/paylo/internal/db"
 	"github.com/likhith2366/paylo/internal/payments"
+	"github.com/likhith2366/paylo/internal/payouts"
 	"github.com/likhith2366/paylo/internal/reconcile"
 )
 
@@ -52,11 +53,19 @@ func run() error {
 	bank := payments.NewBankClient(cfg.BankSimulatorURL, cfg.BankTimeout)
 	reconciler := reconcile.NewService(pool, bank)
 
-	interval := envDuration("RECONCILE_INTERVAL", time.Hour)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	payoutSvc := payouts.NewService(pool, bank)
 
-	slog.Info("scheduler started", "reconcile_interval", interval.String())
+	reconcileEvery := envDuration("RECONCILE_INTERVAL", time.Hour)
+	payoutEvery := envDuration("PAYOUT_INTERVAL", 24*time.Hour)
+
+	reconcileTick := time.NewTicker(reconcileEvery)
+	defer reconcileTick.Stop()
+	payoutTick := time.NewTicker(payoutEvery)
+	defer payoutTick.Stop()
+
+	slog.Info("scheduler started",
+		"reconcile_interval", reconcileEvery.String(),
+		"payout_interval", payoutEvery.String())
 
 	// Run once at startup rather than waiting a full interval — a restart
 	// after an incident is exactly when there is most likely to be something
@@ -68,10 +77,28 @@ func run() error {
 		case <-ctx.Done():
 			slog.Info("scheduler shutting down")
 			return nil
-		case <-ticker.C:
+		case <-reconcileTick.C:
 			runReconciliation(ctx, reconciler)
+		case <-payoutTick.C:
+			runPayouts(ctx, payoutSvc)
 		}
 	}
+}
+
+func runPayouts(ctx context.Context, p *payouts.Service) {
+	jobCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+
+	result, err := p.Run(jobCtx)
+	if err != nil {
+		slog.Error("scheduler: payout run failed", "error", err)
+		return
+	}
+	slog.Info("scheduler: payouts complete",
+		"merchants_considered", result.MerchantsConsidered,
+		"payouts_created", result.PayoutsCreated,
+		"total_cents", result.TotalCents,
+		"skipped", result.Skipped)
 }
 
 func runReconciliation(ctx context.Context, r *reconcile.Service) {

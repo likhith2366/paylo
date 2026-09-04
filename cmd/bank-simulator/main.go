@@ -125,6 +125,7 @@ func main() {
 	r.Get("/simulator/charge/{reference}", srv.handleLookup)
 	r.Post("/simulator/refund", srv.handleRefund)
 	r.Post("/simulator/disputes", srv.handleInjectDispute)
+	r.Post("/simulator/payouts", srv.handleTransfer)
 	r.Post("/simulator/payouts/fail", srv.handlePayoutFail)
 	r.Get("/simulator/3ds/challenge", srv.handle3DSChallenge)
 
@@ -339,6 +340,30 @@ func (s *server) handleInjectDispute(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("dispute injected", "reference", req.ProcessorReference, "reason", req.Reason)
 	writeJSON(w, http.StatusCreated, dispute)
+}
+
+// handleTransfer accepts an ACH payout (§18).
+func (s *server) handleTransfer(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IdempotencyKey string `json:"idempotency_key"`
+		AmountCents    int64  `json:"amount_cents"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if strings.EqualFold(r.Header.Get("X-Simulate-Outcome"), OutcomeDecline) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "rejected", "failure_code": "invalid_routing_number",
+		})
+		return
+	}
+	// Accepted, not settled. A real ACH can still fail days later — that is
+	// what /simulator/payouts/fail exists to drive.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"payout_reference": "ach_" + uuid.NewString(),
+		"status":           "accepted",
+	})
 }
 
 // handlePayoutFail simulates an ACH failure arriving days after the transfer

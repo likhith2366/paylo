@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/likhith2366/paylo/internal/payouts"
 )
 
 // BankClient talks to the acquiring-bank simulator.
@@ -166,6 +168,47 @@ func (c *BankClient) Refund(ctx context.Context, req BankRefundRequest, simulate
 	var out BankRefundResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("%w: decode refund response: %v", ErrAmbiguous, err)
+	}
+	return &out, nil
+}
+
+// Transfer initiates an ACH payout to a merchant's bank account (§18).
+//
+// Acceptance is not settlement: the bank can accept a transfer and reject it
+// days later on a bad routing number, which is why the payout stays in
+// in_transit until confirmed.
+func (c *BankClient) Transfer(ctx context.Context, req payouts.TransferRequest) (*payouts.TransferResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("payments: marshal transfer: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/simulator/payouts", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("payments: build transfer request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, classifyTransportError(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 500 {
+		return nil, fmt.Errorf("%w: bank returned %d", ErrAmbiguous, resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("payments: transfer returned %d", resp.StatusCode)
+	}
+
+	var out payouts.TransferResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("%w: decode transfer response: %v", ErrAmbiguous, err)
 	}
 	return &out, nil
 }
